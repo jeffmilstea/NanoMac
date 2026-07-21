@@ -56,7 +56,7 @@ module videoTimer(
 		end
 	end
 
-	assign _hblank = ~(xpos >= kVisibleWidth);
+	assign _hblank = ~(xpos >= kVisibleWidth + 8);
 	assign _vblank = ~(ypos >= kVisibleHeight);
 	
 	assign videoAddr = 21'h1FD380 - (vid_alt ? 16'h0 : 16'h4000) + { ypos[8:0], xpos[8:4] };	

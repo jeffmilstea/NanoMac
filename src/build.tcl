@@ -38,7 +38,7 @@ add_file misc/ws2812.v
 add_file misc/sd_card.v
 add_file misc/sd_rw.v
 add_file misc/sdcmd_ctrl.v
-add_file misc/hdmi_cdc_bridge.v
+add_file misc/hdmi_mac_bridge.sv
 add_file misc/hdmi_pll.sv
 add_file misc/hdmi_720p.sv
 
