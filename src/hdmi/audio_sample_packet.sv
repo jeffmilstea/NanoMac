@@ -82,10 +82,10 @@ generate
     begin: sample_based_assign
         always_comb
         begin
-            if (8'(frame_counter + i) >= CHANNEL_STATUS_LENGTH)
-                aligned_frame_counter[i] = 8'(frame_counter + i - CHANNEL_STATUS_LENGTH);
+            if (((frame_counter + i) & 8'hFF) >= CHANNEL_STATUS_LENGTH)
+                aligned_frame_counter[i] = ((frame_counter + i - CHANNEL_STATUS_LENGTH) & 8'hFF);
             else
-                aligned_frame_counter[i] = 8'(frame_counter + i);
+                aligned_frame_counter[i] = ((frame_counter + i) & 8'hFF);
         end
         assign header[23 - (3-i)] = aligned_frame_counter[i] == 8'd0 && audio_sample_word_present[i];
         assign header[11 - (3-i)] = audio_sample_word_present[i];

@@ -18,9 +18,15 @@ module serializer
         `ifndef ALTERA_RESERVED_QIS
             // https://www.xilinx.com/support/documentation/user_guides/ug471_7Series_SelectIO.pdf
             logic tmds_plus_clock [NUM_CHANNELS:0];
-            assign tmds_plus_clock = '{tmds_clock, tmds[2], tmds[1], tmds[0]};
+            assign tmds_plus_clock[3] = tmds_clock;
+            assign tmds_plus_clock[2] = tmds[2];
+            assign tmds_plus_clock[1] = tmds[1];
+            assign tmds_plus_clock[0] = tmds[0];
             logic [9:0] tmds_internal_plus_clock [NUM_CHANNELS:0];
-            assign tmds_internal_plus_clock = '{10'b0000011111, tmds_internal[2], tmds_internal[1], tmds_internal[0]};
+            assign tmds_internal_plus_clock[3] = 10'b0000011111;
+            assign tmds_internal_plus_clock[2] = tmds_internal[2];
+            assign tmds_internal_plus_clock[1] = tmds_internal[1];
+            assign tmds_internal_plus_clock[0] = tmds_internal[0];
             logic [1:0] cascade [NUM_CHANNELS:0];
 
             // this is requried for OSERDESE2 to work

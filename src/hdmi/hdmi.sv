@@ -52,7 +52,11 @@ module hdmi
 
     // These outputs go to your HDMI port
     output logic [2:0]		      tmds,
-    output logic		      tmds_clock
+    output logic		      tmds_clock,
+    
+    // Timing outputs for external sync
+    output logic [10:0]           cx_out,
+    output logic [9:0]            cy_out
 );
 
 localparam int NUM_CHANNELS = 3;
@@ -85,6 +89,9 @@ wire [7:0] cea                = timing[7:0];
    
 reg [10:0] cx;
 reg [9:0] cy;
+
+assign cx_out = cx;
+assign cy_out = cy;
 
 always_comb begin
     hsync <= invert[0] ^ (cx >= screen_width + hsync_pulse_start && cx < screen_width + hsync_pulse_start + hsync_pulse_size);

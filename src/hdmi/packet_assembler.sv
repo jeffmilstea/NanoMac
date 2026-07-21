@@ -24,7 +24,7 @@ wire [5:0] counter_t2 = {counter, 1'b0};
 wire [5:0] counter_t2_p1 = {counter, 1'b1};
 
 // Initialize parity bits to 0
-logic [7:0] parity [4:0] = '{8'd0, 8'd0, 8'd0, 8'd0, 8'd0};
+logic [7:0] parity [4:0];
 
 wire [63:0] bch [3:0];
 assign bch[0] = {parity[0], sub[0]};
@@ -67,7 +67,13 @@ endgenerate
 always_ff @(posedge clk_pixel)
 begin
     if (reset)
-        parity <= '{8'd0, 8'd0, 8'd0, 8'd0, 8'd0};
+    begin
+        parity[0] <= 8'd0;
+        parity[1] <= 8'd0;
+        parity[2] <= 8'd0;
+        parity[3] <= 8'd0;
+        parity[4] <= 8'd0;
+    end
     else if (data_island_period)
     begin
         if (counter < 5'd28) // Compute ECC only on subpacket data, not on itself
@@ -77,10 +83,22 @@ begin
                 parity[4] <= parity_next[4];
         end
         else if (counter == 5'd31)
-            parity <= '{8'd0, 8'd0, 8'd0, 8'd0, 8'd0}; // Reset ECC for next packet
+        begin
+            parity[0] <= 8'd0;
+            parity[1] <= 8'd0;
+            parity[2] <= 8'd0;
+            parity[3] <= 8'd0;
+            parity[4] <= 8'd0; // Reset ECC for next packet
+        end
     end
     else
-        parity <= '{8'd0, 8'd0, 8'd0, 8'd0, 8'd0};
+    begin
+        parity[0] <= 8'd0;
+        parity[1] <= 8'd0;
+        parity[2] <= 8'd0;
+        parity[3] <= 8'd0;
+        parity[4] <= 8'd0;
+    end
 end
 
 endmodule
