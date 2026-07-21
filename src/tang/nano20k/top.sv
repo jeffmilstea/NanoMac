@@ -328,6 +328,7 @@ sd_card #(
 wire hs_n, vs_n;
 wire pix;
 
+`ifndef USE_NANOMAC_ADAPTER
 wire [5:0]	video_red;
 wire [5:0] video_green;
 wire [5:0] video_blue;   
@@ -351,6 +352,7 @@ osd_u8g2  #(.H_OFFSET(86)) osd_u8g2 (
         .g_out(video_green),
         .b_out(video_blue)
 );   
+`endif // !USE_NANOMAC_ADAPTER
 
 /* -------------------- Tang Nano 20k SDRAM -------------------- */
 wire [15:0] sdram_dout;
@@ -555,6 +557,175 @@ wire [5:0] leds;
 assign leds[4] = !midi_out;
 assign leds_n = ~leds;   
 					
+/* ---------- HDMI CDC Bridge (Amaranth-generated) ---------- */
+// Provides: RLL-encoded video FIFO (mac→hdmi CDC), audio CDC with
+// 48 kHz interpolation.
+// Enable with: `define USE_NANOMAC_ADAPTER
+`define USE_NANOMAC_ADAPTER
+`ifdef USE_NANOMAC_ADAPTER
+
+// --- New 720p Clocks ---
+wire clk_pixel_74; // 74.25 MHz
+wire clk_serial_371; // 371.25 MHz
+wire hdmi_pll_lock;
+hdmi_pll hdmi_pll_inst (
+    .clkin(clk),
+    .clkout(clk_serial_371),
+    .clkout_p(clk_pixel_74),
+    .lock(hdmi_pll_lock)
+);
+
+// Audio: expand Mac 12-bit signed to 8-bit unsigned for adapter input
+wire [7:0] mac_audio_u8 = audio[11:4] ^ 8'h80;
+
+// 48 kHz sample request tick generator (in 74.25 MHz HDMI pixel clock domain)
+// 74.25 MHz / (48000 * 2) = 773.4375 clocks per tick
+reg [9:0] audio_req_cnt;
+reg       clk_audio_74;
+reg       hdmi_sample_req;
+always @(posedge clk_pixel_74) begin
+    if (audio_req_cnt >= 10'd773) begin
+        audio_req_cnt <= 10'd0;
+        clk_audio_74 <= ~clk_audio_74;
+        hdmi_sample_req <= ~clk_audio_74;
+    end else begin
+        audio_req_cnt <= audio_req_cnt + 10'd1;
+        hdmi_sample_req <= 1'b0;
+    end
+end
+
+// Audio strobe: pulse once per scanline (on hsync falling edge)
+reg hs_prev;
+wire mac_audio_stb = hs_prev & ~hs_n;
+always @(posedge clk_pixel) hs_prev <= hs_n;
+
+// Adapter outputs
+wire [7:0] adapter_r, adapter_g, adapter_b;
+wire [7:0] adapter_audio;
+wire       adapter_overflow, adapter_underflow;
+wire       adapter_vid_overflow, adapter_vid_underflow;
+
+wire [10:0] hdmi_cx_74;
+wire [9:0]  hdmi_cy_74;
+
+// Synthesize active-high video enable and sync signals for the HdmiCdcBridge
+reg [9:0] mac_x_cnt = 0;
+reg [8:0] mac_y_cnt = 0;
+reg hs_n_last = 1'b1, vs_n_last = 1'b1;
+
+always @(posedge clk_pixel) begin
+    hs_n_last <= hs_n;
+    vs_n_last <= vs_n;
+    
+    // hs_n is active low from xpos 526 to 529. It goes high when xpos transitions from 529 to 530.
+    if (hs_n == 1'b1 && hs_n_last == 1'b0) begin
+        mac_x_cnt <= 530;
+    end else if (mac_x_cnt == 703) begin
+        mac_x_cnt <= 0;
+    end else begin
+        mac_x_cnt <= mac_x_cnt + 1'b1;
+    end
+
+    // vs_n is active low from ypos 342 to 346. It goes high when ypos transitions from 346 to 347.
+    if (vs_n == 1'b1 && vs_n_last == 1'b0) begin
+        mac_y_cnt <= 347;
+    end else if (mac_x_cnt == 703) begin
+        if (mac_y_cnt == 369) begin
+            mac_y_cnt <= 0;
+        end else begin
+            mac_y_cnt <= mac_y_cnt + 1'b1;
+        end
+    end
+end
+
+wire mac_h_active = (mac_x_cnt == 703) || (mac_x_cnt < 512);
+wire mac_v_active = (mac_y_cnt < 342);
+
+
+HdmiCdcBridge hdmi_cdc_bridge (
+    // Mac input domain
+    .i_mac_pclk       ( clk_pixel ),
+    .i_mac_video      ( pix ),
+    .i_mac_hsync      ( mac_h_active ),
+    .i_mac_vsync      ( mac_v_active ),
+    .i_mac_clk        ( clk_pixel ),
+    .i_mac_audio_stb  ( mac_audio_stb ),
+    .i_mac_audio_data ( mac_audio_u8 ),
+
+    // HDMI output domain
+    .i_hdmi_clk       ( clk_pixel_74 ),
+    .i_hdmi_sample_req( hdmi_sample_req ),
+    .i_cx             ( {1'b0, hdmi_cx_74} ),
+    .i_cy             ( {2'b00, hdmi_cy_74} ),
+    .o_hdmi_r         ( adapter_r ),
+    .o_hdmi_g         ( adapter_g ),
+    .o_hdmi_b         ( adapter_b ),
+    .o_hdmi_audio     ( adapter_audio ),
+
+    // Diagnostics
+    .o_fifo_overflow  ( adapter_overflow ),
+    .o_fifo_underflow ( adapter_underflow ),
+    .o_video_overflow ( adapter_vid_overflow ),
+    .o_video_underflow( adapter_vid_underflow ),
+
+    .clk              ( clk_pixel_74 ),
+    .rst              ( ~hdmi_pll_lock | cpu_reset )
+);
+
+wire [2:0] tmds;
+wire tmds_clock;
+
+// 16-bit audio
+wire [15:0] adapter_audio16 = { adapter_audio ^ 8'h80, 8'h00 };
+reg [15:0] audio_reg_74 [2];
+always @(posedge clk_pixel_74) begin
+    // Update audio_reg_74 exactly half a cycle BEFORE clk_audio_74 goes high.
+    // This perfectly eliminates CDC setup/hold time violations when hdmi_720p samples
+    // it using the logic-generated clk_audio_74 as a clock domain!
+    if (audio_req_cnt == 10'd386) begin
+        audio_reg_74[0] <= adapter_audio16;
+        audio_reg_74[1] <= adapter_audio16;
+    end
+end
+
+// Genlock sync: pulse genlock exactly once per Mac frame to eliminate tearing
+reg mac_frame_toggle = 1'b0;
+always @(posedge clk_pixel) begin
+    if (mac_x_cnt == 0 && mac_y_cnt == 0)
+        mac_frame_toggle <= ~mac_frame_toggle;
+end
+
+reg [2:0] genlock_sync_reg = 3'b0;
+always @(posedge clk_pixel_74) begin
+    genlock_sync_reg <= {genlock_sync_reg[1:0], mac_frame_toggle};
+end
+wire genlock_sync = (genlock_sync_reg[2] ^ genlock_sync_reg[1]);
+
+hdmi_720p #(
+    .VIDEO_ID_CODE(4),
+    .AUDIO_RATE(48000),
+    .AUDIO_BIT_WIDTH(16),
+    .VENDOR_NAME( { "MiST", 32'd0} ),
+    .PRODUCT_DESCRIPTION( {"NanoMac", 72'd0} )
+) hdmi_out(
+  .clk_pixel_x5(clk_serial_371),
+  .clk_pixel(clk_pixel_74),
+  .clk_audio(clk_audio_74),
+  .audio_sample_word( {audio_reg_74[1], audio_reg_74[0]} ),
+  .tmds(tmds),
+  .tmds_clock(tmds_clock),
+
+  .cx(hdmi_cx_74),
+  .cy(hdmi_cy_74),
+
+  .reset( ~hdmi_pll_lock | cpu_reset ),
+  .genlock( genlock_sync ),
+
+  .rgb( { adapter_r, adapter_g, adapter_b } )
+);
+
+`else // !USE_NANOMAC_ADAPTER
+
 /* -------------------- HDMI video and audio -------------------- */
 
 // latch audio, so it's stable during 48khz transfer
@@ -624,7 +795,7 @@ video_analyzer video_analyzer (
 wire [5:0] video_red   = de?(ccnt[7]?6'h3f:6'h00):6'h00;
 wire [5:0] video_green = de?(border?6'h3f:6'h00):6'h00;
 wire [5:0] video_blue  = de?(ccnt[7]?6'h00:6'h3f):6'h00;  
-`else // !`ifdef TEST_VIDEO
+`else // !TEST_HDMI_VIDEO
 wire vreset;
 video_analyzer video_analyzer (
     .clk(clk_pixel),
@@ -635,6 +806,9 @@ video_analyzer video_analyzer (
 );
 `endif
    
+wire [10:0] hdmi_cx;
+wire [9:0] hdmi_cy;
+
 hdmi #(
     .AUDIO_RATE(`AUDIO_RATE), .AUDIO_BIT_WIDTH(16),
     .VENDOR_NAME( { "MiST", 32'd0} ),
@@ -647,11 +821,15 @@ hdmi #(
   .tmds(tmds),
   .tmds_clock(tmds_clock),
 
+  .cx_out(hdmi_cx),
+  .cy_out(hdmi_cy),
+
   .wide(osd_widescreen),
   .reset(vreset),    // signal to synchronize HDMI
 
   .rgb( { video_red, 2'b00, video_green, 2'b00, video_blue, 2'b00 } )
 );
+`endif // USE_NANOMAC_ADAPTER
 
 // differential output
 ELVDS_OBUF tmds_bufds [3:0] (
