@@ -43,11 +43,12 @@ In addition to the core Mac simulation above, there is a skeleton testbench spec
 
 ### Expected Behavior
 
-Currently, `top_tb.cpp` is just a skeleton clock driver intended to prove that the top-level Verilog logic is syntactically sound and synthesizable. 
+Currently, `top_tb.cpp` is a basic clock driver intended to prove that the top-level Verilog logic is syntactically sound, synthesizable, and capable of executing the boot ROM.
 
 When you run it, you should expect to see:
-1. Verilator successfully parsing `top.sv` and all submodules.
-2. The C++ build completing successfully.
-3. The simulation starting, then immediately crashing with an ALU assertion failure (e.g. `fx68kAlu.sv:317: Assertion failed`) or a `$readmem file not found` error. 
+1. `plusrom.bin` automatically being converted to a hex file and loaded into a simulated internal ROM (bypassing the SPI flash).
+2. Verilator successfully parsing `top.sv` and all submodules.
+3. The C++ build completing successfully.
+4. The simulation executing the CPU instructions from the firmware!
 
-This crash is **expected behavior** because the skeleton testbench does not yet load firmware or ROM data into the `flash_dspi` or SDRAM models, causing the CPU to fetch garbage memory and halt. Future testbench expansion would involve feeding the proper boot ROMs into the `Vtop` C++ model.
+*(Note: Ensure you copy both `plusrom.bin` and `src/companion/macplus_xml.hex` into your execution directory before running, otherwise the simulation will crash with a `$readmem` file not found error.)*
