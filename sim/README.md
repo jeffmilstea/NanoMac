@@ -52,3 +52,13 @@ When you run it, you should expect to see:
 4. The simulation executing the CPU instructions from the firmware!
 
 *(Note: Ensure you copy both `plusrom.bin` and `src/companion/macplus_xml.hex` into your execution directory before running, otherwise the simulation will crash with a `$readmem` file not found error.)*
+
+### Icarus Verilog (iverilog) Alternative
+
+If you wish to simulate the full boot process including the onboard 64Mbit SDRAM, Verilator is not ideal because it rejects the event-driven timing models (`#delays`) provided by memory vendors. 
+
+Instead, you can use **Icarus Verilog (iverilog)**. The Tang Nano 20K uses a GW2AR-18C System-in-Package which embeds a 64Mbit SDRAM die. For `iverilog`, developers commonly use the standard Micron behavioral model **`MT48LC2M32B2.v`**. 
+
+To build an `iverilog` testbench:
+1. Include the `MT48LC2M32B2.v` model in your top-level simulation wrapper and connect it to the `O_sdram_*` and `IO_sdram_dq` pins on `top.sv`.
+2. You can safely reuse the `sim/gowin_mocks.v` file provided in this directory to stub out the Gowin primitives (like `ELVDS_OBUF`), as it is fully compatible with both Verilator and `iverilog`.
