@@ -1,22 +1,89 @@
 module hdmi_mac_bridge (
     input  wire        mac_clk,
-    input  wire        mac_h_active,
-    input  wire        mac_v_active,
+    input  wire        mac_hs_n,
+    input  wire        mac_vs_n,
     input  wire        mac_pix,
-    input  wire        mac_audio_stb,
     input  wire [15:0] mac_audio_16,
     
     input  wire        hdmi_clk,
-    input  wire        hdmi_sample_req,
     input  wire [10:0] hdmi_x,
     input  wire [9:0]  hdmi_y,
     
     output wire [7:0]  hdmi_r,
     output wire [7:0]  hdmi_g,
     output wire [7:0]  hdmi_b,
-    output wire [15:0] hdmi_audio,
+    output wire [31:0] hdmi_audio_sample,
+    output wire        hdmi_audio_clk,
+    output wire        genlock_sync,
     input  wire        wide
 );
+
+    // --- MAC ACTIVE SYNTHESIS ---
+    reg [9:0] mac_x_cnt = 0;
+    reg [8:0] mac_y_cnt = 0;
+    reg hs_n_last = 1'b1, vs_n_last = 1'b1;
+    
+    always @(posedge mac_clk) begin
+        hs_n_last <= mac_hs_n;
+        vs_n_last <= mac_vs_n;
+        
+        if (mac_hs_n == 1'b1 && hs_n_last == 1'b0) begin
+            mac_x_cnt <= 530;
+        end else if (mac_x_cnt == 703) begin
+            mac_x_cnt <= 0;
+        end else begin
+            mac_x_cnt <= mac_x_cnt + 1'b1;
+        end
+    
+        if (mac_vs_n == 1'b1 && vs_n_last == 1'b0) begin
+            mac_y_cnt <= 347;
+        end else if (mac_x_cnt == 703) begin
+            if (mac_y_cnt == 369) begin
+                mac_y_cnt <= 0;
+            end else begin
+                mac_y_cnt <= mac_y_cnt + 1'b1;
+            end
+        end
+    end
+    
+    wire mac_h_active = (mac_x_cnt >= 7 && mac_x_cnt < 519);
+    wire mac_v_active = (mac_y_cnt < 342);
+
+    // --- GENLOCK SYNC ---
+    reg mac_frame_toggle = 1'b0;
+    always @(posedge mac_clk) begin
+        if (mac_y_cnt == 284 && mac_x_cnt == 231)
+            mac_frame_toggle <= ~mac_frame_toggle;
+    end
+    
+    reg [2:0] genlock_sync_reg = 3'b0;
+    always @(posedge hdmi_clk) begin
+        genlock_sync_reg <= {genlock_sync_reg[1:0], mac_frame_toggle};
+    end
+    assign genlock_sync = (genlock_sync_reg[2] ^ genlock_sync_reg[1]);
+
+    // --- MAC AUDIO STROBE ---
+    reg hs_prev;
+    always @(posedge mac_clk) hs_prev <= mac_hs_n;
+    wire mac_audio_stb = hs_prev & ~mac_hs_n;
+
+    // --- AUDIO REQUEST CLOCK (48 kHz) ---
+    // 78.336 MHz / (48000 * 2) = 816 clocks per tick
+    reg [9:0] audio_req_cnt = 0;
+    reg       clk_audio_74 = 0;
+    reg       hdmi_sample_req = 0;
+    always @(posedge hdmi_clk) begin
+        if (audio_req_cnt >= 10'd815) begin
+            audio_req_cnt <= 10'd0;
+            clk_audio_74 <= ~clk_audio_74;
+            hdmi_sample_req <= ~clk_audio_74;
+        end else begin
+            audio_req_cnt <= audio_req_cnt + 10'd1;
+            hdmi_sample_req <= 1'b0;
+        end
+    end
+    
+    assign hdmi_audio_clk = clk_audio_74;
 
     // --- VIDEO FRAMEBUFFER ---
     // 512 x 342 = 175,104 bits = 5472 words of 32 bits
@@ -81,8 +148,6 @@ module hdmi_mac_bridge (
     assign hdmi_b = in_window_q ? active_pixel : 8'h10;
     
     // --- AUDIO INTERPOLATOR ---
-    // Cross domain (mac_clk to hdmi_clk). Since they are mathematically locked (hdmi_clk = 5*mac_clk),
-    // a simple synchronizer on the strobe is enough.
     reg [2:0] audio_stb_sync;
     reg [15:0] audio_data_sync;
     
@@ -93,7 +158,6 @@ module hdmi_mac_bridge (
         end
     end
     
-    // Phase accumulator: 22.2545 kHz / 48.0 kHz * 65536 = 30385
     reg [15:0] phase_acc;
     reg [15:0]  current_sample, next_sample;
     
@@ -109,6 +173,13 @@ module hdmi_mac_bridge (
         end
     end
     
-    assign hdmi_audio = current_sample;
+    reg [15:0] hdmi_audio_reg;
+    always @(posedge hdmi_clk) begin
+        if (audio_req_cnt == 10'd407) begin
+            hdmi_audio_reg <= current_sample;
+        end
+    end
+
+    assign hdmi_audio_sample = {hdmi_audio_reg, hdmi_audio_reg};
 
 endmodule

@@ -575,120 +575,38 @@ wire [15:0] audio16 =
     (osd_volume == 2'd3)?{ {1{audio[11]}}, audio, 3'b000 }:
     16'h0000;
 
-// 48 kHz sample request tick generator (in 78.3 MHz HDMI pixel clock domain)
-// 78.336 MHz / (48000 * 2) = 816 clocks per tick
-reg [9:0] audio_req_cnt;
-reg       clk_audio_74;
-reg       hdmi_sample_req;
-always @(posedge clk_pixel_x5) begin
-    if (audio_req_cnt >= 10'd815) begin
-        audio_req_cnt <= 10'd0;
-        clk_audio_74 <= ~clk_audio_74;
-        hdmi_sample_req <= ~clk_audio_74;
-    end else begin
-        audio_req_cnt <= audio_req_cnt + 10'd1;
-        hdmi_sample_req <= 1'b0;
-    end
-end
-
-// Audio strobe: pulse once per scanline (on hsync falling edge)
-reg hs_prev;
-wire mac_audio_stb = hs_prev & ~hs_n;
-always @(posedge clk_pixel) hs_prev <= hs_n;
-
 // Adapter outputs
 wire [7:0] adapter_r, adapter_g, adapter_b;
-wire [7:0] adapter_audio;
-wire       adapter_overflow, adapter_underflow;
-wire       adapter_vid_overflow, adapter_vid_underflow;
+wire [31:0] adapter_audio_sample;
+wire clk_audio_74;
+wire genlock_sync;
 
 wire [10:0] hdmi_cx_74;
 wire [9:0]  hdmi_cy_74;
 
-// Synthesize active-high video enable and sync signals for the HdmiCdcBridge
-reg [9:0] mac_x_cnt = 0;
-reg [8:0] mac_y_cnt = 0;
-reg hs_n_last = 1'b1, vs_n_last = 1'b1;
-
-always @(posedge clk_pixel) begin
-    hs_n_last <= hs_n;
-    vs_n_last <= vs_n;
-    
-    // hs_n is active low from xpos 526 to 529. It goes high when xpos transitions from 529 to 530.
-    if (hs_n == 1'b1 && hs_n_last == 1'b0) begin
-        mac_x_cnt <= 530;
-    end else if (mac_x_cnt == 703) begin
-        mac_x_cnt <= 0;
-    end else begin
-        mac_x_cnt <= mac_x_cnt + 1'b1;
-    end
-
-    // vs_n is active low from ypos 342 to 346. It goes high when ypos transitions from 346 to 347.
-    if (vs_n == 1'b1 && vs_n_last == 1'b0) begin
-        mac_y_cnt <= 347;
-    end else if (mac_x_cnt == 703) begin
-        if (mac_y_cnt == 369) begin
-            mac_y_cnt <= 0;
-        end else begin
-            mac_y_cnt <= mac_y_cnt + 1'b1;
-        end
-    end
-end
-
-wire mac_h_active = (mac_x_cnt >= 7 && mac_x_cnt < 519);
-wire mac_v_active = (mac_y_cnt < 342);
-
-
 // --- New HDMI Mac Bridge ---
 hdmi_mac_bridge hdmi_bridge (
     .mac_clk          ( clk_pixel ),
-    .mac_h_active     ( mac_h_active ),
-    .mac_v_active     ( mac_v_active ),
+    .mac_hs_n         ( hs_n ),
+    .mac_vs_n         ( vs_n ),
     .mac_pix          ( pix ),
-    .mac_audio_stb    ( mac_audio_stb ),
     .mac_audio_16     ( audio16 ),
     
     .hdmi_clk         ( clk_pixel_x5 ),
-    .hdmi_sample_req  ( hdmi_sample_req ),
     .hdmi_x           ( {1'b0, hdmi_cx_74} ),
     .hdmi_y           ( {2'b00, hdmi_cy_74} ),
     
     .hdmi_r           ( adapter_r ),
     .hdmi_g           ( adapter_g ),
     .hdmi_b           ( adapter_b ),
-    .hdmi_audio       ( adapter_audio16 ),
+    .hdmi_audio_sample( adapter_audio_sample ),
+    .hdmi_audio_clk   ( clk_audio_74 ),
+    .genlock_sync     ( genlock_sync ),
     .wide             ( osd_widescreen )
 );
 
-wire [15:0] adapter_audio16;
 wire [2:0] tmds;
 wire tmds_clock;
-
-// 16-bit audio from hdmi_mac_bridge
-reg [15:0] audio_reg_74 [2];
-always @(posedge clk_pixel_x5) begin
-    // Update audio_reg_74 exactly half a cycle BEFORE clk_audio_74 goes high.
-    // This perfectly eliminates CDC setup/hold time violations when hdmi_720p samples
-    // it using the logic-generated clk_audio_74 as a clock domain!
-    if (audio_req_cnt == 10'd407) begin
-        audio_reg_74[0] <= adapter_audio16;
-        audio_reg_74[1] <= adapter_audio16;
-    end
-end
-
-// Genlock sync: trigger HDMI frame start exactly 60,313 Mac clocks before Mac active video
-// This ensures HDMI reaches cx=384, cy=185 exactly when Mac reaches x=0, y=0.
-reg mac_frame_toggle = 1'b0;
-always @(posedge clk_pixel) begin
-    if (mac_y_cnt == 284 && mac_x_cnt == 231)
-        mac_frame_toggle <= ~mac_frame_toggle;
-end
-
-reg [2:0] genlock_sync_reg = 3'b0;
-always @(posedge clk_pixel_x5) begin
-    genlock_sync_reg <= {genlock_sync_reg[1:0], mac_frame_toggle};
-end
-wire genlock_sync = (genlock_sync_reg[2] ^ genlock_sync_reg[1]);
 
 wire [5:0] osd_r, osd_g, osd_b;
 
@@ -731,7 +649,7 @@ hdmi_720p #(
   .clk_pixel_x5(clk_serial_371),
   .clk_pixel(clk_pixel_x5),
   .clk_audio(clk_audio_74),
-  .audio_sample_word( {audio_reg_74[1], audio_reg_74[0]} ),
+  .audio_sample_word( adapter_audio_sample ),
   .tmds(tmds),
   .tmds_clock(tmds_clock),
 
