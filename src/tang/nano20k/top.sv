@@ -573,7 +573,7 @@ wire [5:0] leds;
 assign leds[4] = !midi_out;
 assign leds_n = ~leds;   
 					
-/* ---------- HDMI CDC Bridge (Amaranth-generated) ---------- */
+/* ---------- HDMI CDC Bridge ---------- */
 // Provides: RLL-encoded video FIFO (mac→hdmi CDC), audio CDC with
 // 48 kHz interpolation.
 // Enable with: `define USE_NANOMAC_ADAPTER

@@ -44,7 +44,6 @@
         <File path="macplus/videoShifter.v" type="file.verilog" enable="1"/>
         <File path="macplus/videoTimer.v" type="file.verilog" enable="1"/>
         <File path="misc/hdmi_720p.sv" type="file.verilog" enable="1"/>
-        <File path="misc/hdmi_cdc_bridge.v" type="file.verilog" enable="1"/>
         <File path="misc/hdmi_pll.sv" type="file.verilog" enable="1"/>
         <File path="misc/hdmi_pll/hdmi_pll.v" type="file.verilog" enable="1"/>
         <File path="misc/sd_card.v" type="file.verilog" enable="1"/>
