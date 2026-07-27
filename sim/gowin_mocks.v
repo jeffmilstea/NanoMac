@@ -1,12 +1,7 @@
 // 
 // Gowin Verilator Mocks
 //
-// These are simplified, perfectly digital behavioral models of Gowin FPGA
-// primitives. They contain no analog simulation hacks, `#` delays, or 
-// non-synthesizable constructs, making them 100% compatible with Verilator.
-//
 
-// Differential Output Buffer
 module ELVDS_OBUF (
     input  wire I,
     output wire O,
@@ -16,14 +11,11 @@ module ELVDS_OBUF (
     assign OB = ~I;
 endmodule
 
-// Clock Divider
 module Gowin_CLKDIV (
     input  wire hclkin,
     input  wire resetn,
     output reg  clkout
 );
-    // In a real simulation testbench you might want to mock the actual divide ratio
-    // (e.g. divide by 5). This simple toggle acts as a standard divide-by-2 placeholder.
     always @(posedge hclkin or negedge resetn) begin
         if (!resetn)
             clkout <= 1'b0;
@@ -32,8 +24,30 @@ module Gowin_CLKDIV (
     end
 endmodule
 
-// rPLL
-module rPLL (
+module rPLL #(
+    parameter FCLKIN = "27",
+    parameter DYN_IDIV_SEL = "false",
+    parameter IDIV_SEL = 1,
+    parameter DYN_FBDIV_SEL = "false",
+    parameter FBDIV_SEL = 28,
+    parameter DYN_ODIV_SEL = "false",
+    parameter ODIV_SEL = 2,
+    parameter PSDA_SEL = "0000",
+    parameter DYN_DA_EN = "true",
+    parameter DUTYDA_SEL = "1000",
+    parameter CLKOUT_FT_DIR = 1'b1,
+    parameter CLKOUTP_FT_DIR = 1'b1,
+    parameter CLKOUT_DLY_STEP = 0,
+    parameter CLKOUTP_DLY_STEP = 0,
+    parameter CLKFB_SEL = "internal",
+    parameter CLKOUT_BYPASS = "false",
+    parameter CLKOUTP_BYPASS = "false",
+    parameter CLKOUTD_BYPASS = "false",
+    parameter DYN_SDIV_SEL = 2,
+    parameter CLKOUTD_SRC = "CLKOUT",
+    parameter CLKOUTD3_SRC = "CLKOUT",
+    parameter DEVICE = "GW2AR-18C"
+) (
     input  wire CLKIN,
     output wire CLKOUT,
     output wire LOCK,
@@ -50,15 +64,10 @@ module rPLL (
     input  wire [3:0] DUTYDA,
     input  wire [3:0] FDLY
 );
-    // Just pass the clock straight through for digital simulation.
-    // In a real testbench, you'd drive CLKOUT with a separate thread/generator 
-    // to model the exact multiplied frequency.
     assign CLKOUT = CLKIN;
     assign CLKOUTP = CLKIN;
     assign CLKOUTD = CLKIN;
     assign CLKOUTD3 = CLKIN;
-    
-    // Simulate instantaneous lock
     assign LOCK = ~RESET;
-
 endmodule
+
