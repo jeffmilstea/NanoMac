@@ -94,7 +94,7 @@ module hdmi_mac_bridge (
     reg w_active_prev;
     reg [31:0] shift_reg;
     
-    wire [12:0] w_addr = {w_y[8:0], w_x[9:5]};
+    wire [12:0] w_addr = {w_y[8:0], w_x[8:5]};
 
     always @(posedge mac_clk) begin
         if (mac_v_active && mac_h_active) begin
@@ -127,7 +127,7 @@ module hdmi_mac_bridge (
     wire [10:0] read_x = in_window ? (wide ? read_x_2x : read_x_1x) : 11'd0;
     wire [9:0]  read_y = in_window ? (wide ? read_y_2x : read_y_1x) : 10'd0;
     
-    wire [12:0] r_addr = {read_y[8:0], read_x[9:5]};
+    wire [12:0] r_addr = {read_y[8:0], read_x[8:5]};
     
     // Pipelined read side (2 clock stages for maximum timing margin)
     reg [12:0] r_addr_q;
