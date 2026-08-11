@@ -86,19 +86,21 @@ module hdmi_mac_bridge (
     assign hdmi_audio_clk = clk_audio_74;
 
     // --- VIDEO FRAMEBUFFER ---
-    // 512 x 342 = 175,104 bits = 5472 words of 32 bits
-    reg [31:0] frame_buf [0:5471];
+    // 512 x 342 = 175,104 bits -> 8192 words of 32 bits (Power-of-two depth for clean BSRAM inference)
+    reg [31:0] frame_buf [0:8191];
     
     reg [9:0] w_x;
     reg [8:0] w_y;
     reg w_active_prev;
     reg [31:0] shift_reg;
     
+    wire [12:0] w_addr = {w_y[8:0], w_x[9:5]};
+
     always @(posedge mac_clk) begin
         if (mac_v_active && mac_h_active) begin
             shift_reg <= {shift_reg[30:0], mac_pix};
             if (w_x[4:0] == 5'd31) begin
-                frame_buf[w_y * 16 + (w_x >> 5)] <= {shift_reg[30:0], mac_pix};
+                frame_buf[w_addr] <= {shift_reg[30:0], mac_pix};
             end
             w_x <= w_x + 1;
         end else if (!mac_h_active) begin
@@ -125,27 +127,31 @@ module hdmi_mac_bridge (
     wire [10:0] read_x = in_window ? (wide ? read_x_2x : read_x_1x) : 11'd0;
     wire [9:0]  read_y = in_window ? (wide ? read_y_2x : read_y_1x) : 10'd0;
     
+    wire [12:0] r_addr = {read_y[8:0], read_x[9:5]};
+    
+    // Pipelined read side (2 clock stages for maximum timing margin)
+    reg [12:0] r_addr_q;
     reg [31:0] r_word;
-    wire [12:0] r_addr = read_y * 16 + (read_x >> 5);
+    reg in_window_q, in_window_q2;
+    reg [4:0] read_x_q, read_x_q2;
     
     always @(posedge hdmi_clk) begin
-        r_word <= frame_buf[r_addr];
-    end
-    
-    // The word is delayed by 1 clock. So we must delay in_window and read_x by 1 clock too.
-    reg in_window_q;
-    reg [4:0] read_x_q;
-    always @(posedge hdmi_clk) begin
+        r_addr_q    <= r_addr;
+        r_word      <= frame_buf[r_addr_q];
+        
         in_window_q <= in_window;
-        read_x_q <= read_x[4:0];
+        in_window_q2 <= in_window_q;
+        
+        read_x_q    <= read_x[4:0];
+        read_x_q2   <= read_x_q;
     end
     
-    wire pixel_bit = r_word[31 - read_x_q];
+    wire pixel_bit = r_word[31 - read_x_q2];
     wire [7:0] active_pixel = pixel_bit ? 8'hFF : 8'h00; // White or Black
     
-    assign hdmi_r = in_window_q ? active_pixel : 8'h02; // Dark blue borders
-    assign hdmi_g = in_window_q ? active_pixel : 8'h02;
-    assign hdmi_b = in_window_q ? active_pixel : 8'h10;
+    assign hdmi_r = in_window_q2 ? active_pixel : 8'h02; // Dark blue borders
+    assign hdmi_g = in_window_q2 ? active_pixel : 8'h02;
+    assign hdmi_b = in_window_q2 ? active_pixel : 8'h10;
     
     // --- AUDIO INTERPOLATOR ---
     reg [2:0] audio_stb_sync;
@@ -159,7 +165,9 @@ module hdmi_mac_bridge (
     end
     
     reg [15:0] phase_acc;
-    reg [15:0]  current_sample, next_sample;
+    reg [15:0] current_sample, next_sample;
+    
+    wire [16:0] audio_phase_sum = phase_acc + 17'd30385;
     
     always @(posedge hdmi_clk) begin
         if (audio_stb_sync[1] && !audio_stb_sync[2]) begin
@@ -167,9 +175,10 @@ module hdmi_mac_bridge (
         end
         
         if (hdmi_sample_req) begin
-            {current_sample, phase_acc} <= phase_acc + 16'd30385 < phase_acc ? 
-                                           {next_sample, phase_acc + 16'd30385} : 
-                                           {current_sample, phase_acc + 16'd30385};
+            phase_acc <= audio_phase_sum[15:0];
+            if (audio_phase_sum[16]) begin
+                current_sample <= next_sample;
+            end
         end
     end
     
