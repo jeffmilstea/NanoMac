@@ -61,8 +61,9 @@
 	<listentry label="4MB" value="3"/>
       </list>
       <list label="Screen:" id="X" default="0">
-	<listentry label="Normal" value="0"/>
-	<listentry label="Wide" value="1"/>
+	<listentry label="1x 720p" value="0"/>
+	<listentry label="2x Wide" value="1"/>
+	<listentry label="Native 512x342" value="2"/>
       </list>
       <list label="Serial:" id="M" default="0">
 	<listentry label="WiFi" value="0"/>

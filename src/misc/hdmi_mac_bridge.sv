@@ -15,6 +15,7 @@ module hdmi_mac_bridge (
     output wire [31:0] hdmi_audio_sample,
     output wire        hdmi_audio_clk,
     output wire        genlock_sync,
+    input  wire [1:0]  video_mode,
     input  wire        wide
 );
 
@@ -123,9 +124,14 @@ module hdmi_mac_bridge (
     wire [10:0] read_x_2x = (hdmi_x - 11'd128) >> 1;
     wire [9:0]  read_y_2x = (hdmi_y - 10'd18) >> 1;
 
-    wire in_window = wide ? in_window_2x : in_window_1x;
-    wire [10:0] read_x = in_window ? (wide ? read_x_2x : read_x_1x) : 11'd0;
-    wire [9:0]  read_y = in_window ? (wide ? read_y_2x : read_y_1x) : 10'd0;
+    // Native 512x342 window (0..511, 0..341)
+    wire in_window_native = (hdmi_x < 512) && (hdmi_y < 342);
+    wire [10:0] read_x_native = hdmi_x;
+    wire [9:0]  read_y_native = hdmi_y;
+
+    wire in_window = (video_mode == 2'b10) ? in_window_native : (wide ? in_window_2x : in_window_1x);
+    wire [10:0] read_x = in_window ? ((video_mode == 2'b10) ? read_x_native : (wide ? read_x_2x : read_x_1x)) : 11'd0;
+    wire [9:0]  read_y = in_window ? ((video_mode == 2'b10) ? read_y_native : (wide ? read_y_2x : read_y_1x)) : 10'd0;
     
     wire [12:0] r_addr = {read_y[8:0], read_x[8:5]};
     

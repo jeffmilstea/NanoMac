@@ -28,7 +28,7 @@ module sysctrl (
 		
   // values that can be configured by the user		
   output	    system_reset,
-  output reg	    system_widescreen,
+  output reg [1:0]  system_video_mode,
   output reg	    system_serial_ext,
   output reg	    system_fastboot,
   output reg [1:0]  system_memory,
@@ -215,7 +215,7 @@ always @(posedge clk) begin
 
       // OSD value defaults. These should be sane defaults, but the MCU
       // will very likely override these early
-      system_widescreen <= 1'b0;           // normal screen by default      
+      system_video_mode <= 2'b00;          // 00=1x 720p, 01=2x Wide, 10=Native 512x342
       system_serial_ext <= 1'b0;           // redirect serial to wifi by default
       system_memory <= 2'd1;               // 512k
       system_volume <= 2'd1;               // volume low
@@ -252,6 +252,11 @@ always @(posedge clk) begin
 	sys_int <= 1'b1;      
       
       // monitor buttons for changes and raise interrupt
+      // S0 + S1 emergency fallback override to 720p 1x (2'b00)
+      if (buttonsD2 == 2'b00) begin
+         system_video_mode <= 2'b00;
+      end
+
       if(buttons_irq_enable) begin
         if(buttonsD2 != buttonsD) begin
             // irq_enable prevents further interrupts until
@@ -318,8 +323,8 @@ always @(posedge clk) begin
 		   if(id == "V") system_volume <= data_in[1:0];
 		   // Value "W": Floppy write protect int (0) and ext (1)
 		   if(id == "W") system_floppy_wprot <= data_in[1:0];
-		   // Value "X": Normal(0) or Wide(1) screen
-		   if(id == "X") system_widescreen <= data_in[0];
+		   // Value "X": 1x 720p(0), 2x Wide(1), Native 512x342(2)
+		   if(id == "X") system_video_mode <= data_in[1:0];
 		   // Value "S": HDD write protect enabled
 		   if(id == "S") system_hdd_wprot <= data_in[0];
 		   // Value "F": fastboot off(0) or on(1), disables rom and ram checks

@@ -46,6 +46,7 @@ module hdmi
 
     // synchronous reset back to 0,0
     input logic			      reset,
+    input logic [1:0]                 video_mode, // 00=1x 720p, 01=2x Wide, 10=Native 512x342
     input logic                       wide,
     input logic [23:0]		      rgb, 
     input logic [AUDIO_BIT_WIDTH-1:0] audio_sample_word [1:0],
