@@ -656,7 +656,7 @@ hdmi_720p #(
   .cx(hdmi_cx_74),
   .cy(hdmi_cy_74),
 
-  .reset( ~hdmi_pll_lock | cpu_reset ),
+  .reset( ~hdmi_pll_lock ),
 
   .rgb( { osd_r, 2'b00, osd_g, 2'b00, osd_b, 2'b00 } )
 );
