@@ -28,27 +28,26 @@ module hdmi_mac_bridge (
         hs_n_last <= mac_hs_n;
         vs_n_last <= mac_vs_n;
         
-        if (mac_hs_n == 1'b1 && hs_n_last == 1'b0) begin
-            mac_x_cnt <= 530;
-        end else if (mac_x_cnt == 703) begin
+        // HSync falling edge = Start of horizontal sync / raster line reset
+        if (mac_hs_n == 1'b0 && hs_n_last == 1'b1) begin
             mac_x_cnt <= 0;
+            if (mac_y_cnt == 369)
+                mac_y_cnt <= 0;
+            else
+                mac_y_cnt <= mac_y_cnt + 1'b1;
         end else begin
             mac_x_cnt <= mac_x_cnt + 1'b1;
         end
     
-        if (mac_vs_n == 1'b1 && vs_n_last == 1'b0) begin
-            mac_y_cnt <= 347;
-        end else if (mac_x_cnt == 703) begin
-            if (mac_y_cnt == 369) begin
-                mac_y_cnt <= 0;
-            end else begin
-                mac_y_cnt <= mac_y_cnt + 1'b1;
-            end
+        // VSync falling edge = Start of vertical frame
+        if (mac_vs_n == 1'b0 && vs_n_last == 1'b1) begin
+            mac_y_cnt <= 0;
         end
     end
     
-    wire mac_h_active = (mac_x_cnt >= 7 && mac_x_cnt < 519);
-    wire mac_v_active = (mac_y_cnt < 342);
+    // Active visible region: 512 pixels x 342 lines
+    wire mac_h_active = (mac_x_cnt >= 178 && mac_x_cnt < 690);
+    wire mac_v_active = (mac_y_cnt >= 28 && mac_y_cnt < 370);
 
     // --- GENLOCK SYNC ---
     reg mac_frame_toggle = 1'b0;
