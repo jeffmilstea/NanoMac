@@ -432,15 +432,12 @@ wire [17:0] rom_addr;
 wire rom_oe_n;
 wire [15:0]	rom_data;   
 
-// `define INT_ROM
+`define INT_ROM
 
 `ifdef INT_ROM
-// some small 2k FPGA internal ROM (or full 128KB ROM in Verilator)
+// Full 128KB Macintosh Plus ROM embedded in FPGA Block RAM (BSRAM)
 // xxd -c2 -p plusrom.bin > plusrom.hex
 
-wire [15:0]	rom_data_X;   
-
-`ifdef VERILATOR
 reg [15:0] int_rom [65536];
 initial $readmemh("plusrom.hex", int_rom);  
 
@@ -448,21 +445,8 @@ reg [15:0] rom_data_I;
 assign rom_data = rom_data_I;
    
 always @(posedge clk_pixel)
-   if(phase == 5 && !rom_oe_n)
+   if (!rom_oe_n)
 	 rom_data_I <= int_rom[rom_addr[15:0]];
-`else
-reg [15:0] int_rom [8192];
-initial $readmemh("plusrom.hex", int_rom);  
-
-reg [15:0] rom_data_I;
-wire int_rom_sel = rom_addr[17:13] == 5'b00000;   
-
-assign rom_data = int_rom_sel?rom_data_I:rom_data_X;   
-   
-always @(posedge clk_pixel)
-   if(phase == 5 && !rom_oe_n)
-	 rom_data_I <= int_rom[rom_addr];
-`endif
 `endif
    
 assign mspi_clk = ~clk_pixel_x5;   
