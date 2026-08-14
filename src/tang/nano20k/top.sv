@@ -107,7 +107,11 @@ wire ram_ready;
 // generate a reset for some time after rom has been initialized
 reg [15:0] reset_cnt;
 always @(negedge clk_pixel) begin
+`ifdef INT_ROM
+    if(!pll_lock || reset || !ram_ready || osd_reset)
+`else
     if(!pll_lock || reset || !ram_ready || !flash_ready || osd_reset)
+`endif
         reset_cnt <= 16'hfff;
     else if(reset_cnt != 0)
         reset_cnt = reset_cnt - 16'd1;
