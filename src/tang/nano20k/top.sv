@@ -445,12 +445,7 @@ wire [15:0]	rom_data;
 reg [15:0] int_rom [65536];
 initial $readmemh("plusrom.hex", int_rom);  
 
-reg [15:0] rom_data_I;
-assign rom_data = rom_data_I;
-   
-always @(posedge clk_pixel)
-   if (!rom_oe_n)
-	 rom_data_I <= int_rom[rom_addr[15:0]];
+assign rom_data = int_rom[rom_addr[15:0]];
 `endif
    
 assign mspi_clk = ~clk_pixel_x5;   
