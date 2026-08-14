@@ -95,6 +95,7 @@ wire       osd_serial_ext;      // 0=WiFi, 1=external
 wire [1:0] osd_memory;          // 0=128k, 1=512k, 2=1M, 3=4M
 wire [1:0] osd_volume;          // 0=off, 1=low, 2=mid, 3=hi
 wire [1:0] osd_floppy_wprot;    // 0=int, 1=ext
+wire [1:0] osd_turbo;           // 0=Off, 1=2x, 2=4x, 3=Max
 wire       osd_hdd_wprot;       // 0=rw, 1=ro
 
 // busphase 0..7 of mac. Used to synchronize sdram to video and cpu
@@ -257,6 +258,7 @@ sysctrl sysctrl (
         .system_serial_ext(osd_serial_ext),
         .system_memory(osd_memory),
 		.system_floppy_wprot(osd_floppy_wprot),
+        .system_turbo(osd_turbo),
 		.system_hdd_wprot(osd_hdd_wprot),
                                  
         .int_out_n(spi_irqn),
@@ -526,6 +528,7 @@ macplus macplus (
     .configFastboot(osd_fastboot), // enable fastboot
 	.configRAMSize(osd_memory), // 128k, 512k, 1MB or 4MB
 	.configMachineType(1'b0),   // Plus, SE
+    .configTurbo(osd_turbo),
     .configFloppyWProt(osd_floppy_wprot), // floppy disk write protections
     .configSCSIWProt(osd_hdd_wprot), // hdd/scsi disk write protection
  

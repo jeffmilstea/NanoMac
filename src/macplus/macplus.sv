@@ -52,6 +52,7 @@ module macplus
 	input		       configMachineType, // 0 = Plus, 1 = SE
 	input [1:0]	       configFloppyWProt,
 	input		       configSCSIWProt,
+	input [1:0]	       configTurbo,
 			  
         // interface to sd card
 	input [31:0]	       sdc_image_size,
@@ -192,19 +193,30 @@ assign      _cpuVPA = (cpuFC == 3'b111) ? 1'b0 : ~(!_cpuAS && selectVIA);
 wire	refreshCycle;
    
 // Make sure, we never end a memory cycle before the memory was able to return data
-wire	cpuBusCycleDone = busPhase >= 4;
+// Turbo Mode Clock & DTACK Logic:
+// configTurbo = 0: Off (7.8 MHz)
+// configTurbo = 1: 2x (15.6 MHz)
+// configTurbo = 2: 4x (31.3 MHz via continuous execution)
+// configTurbo = 3: Max Turbo (Zero wait state ROM & continuous execution)
+wire cpu_turbo_active = (configTurbo != 2'b00);
+wire cpu_turbo_max    = (configTurbo == 2'b11);
+
+wire turbo_enPhi1 = cpu_turbo_active ? 1'b1 : clk8_en_p;
+wire turbo_enPhi2 = cpu_turbo_active ? 1'b1 : clk8_en_n;
+
+wire	cpuBusCycleDone = cpu_turbo_active ? 1'b1 : (busPhase >= 4);
 wire	cpuOnVideoBusControl = !loadPixels && !loadSound && !refreshCycle && videoBusControl && !_cpuAS && selectRAM;   
 assign      _cpuDTACK = ~((!_cpuAS_R && selectRAM && cpuBusControl && cpuBusCycleDone) ||
 			  (!_cpuAS_R && selectRAM && cpuOnVideoBusControl && cpuBusCycleDone) ||
-			  (!_cpuAS_R && selectROM && cpuBusCycleDone) ||
+			  (!_cpuAS_R && selectROM && (cpuBusCycleDone || cpu_turbo_max)) ||
                           (!_cpuAS && !selectVIA && !selectRAM && !selectROM)); // everything else but the VIA
 
 fx68k fx68k (
 	.clk        ( clk_sys ),
 	.extReset   ( !_cpuReset ),
 	.pwrUp      ( !_cpuReset ),
-	.enPhi1     ( clk8_en_p   ),
-	.enPhi2     ( clk8_en_n   ),
+	.enPhi1     ( turbo_enPhi1 ),
+	.enPhi2     ( turbo_enPhi2 ),
 
 	.eRWn       ( _cpuRW ),
 	.ASn        ( _cpuAS ),

@@ -34,6 +34,7 @@ module sysctrl (
   output reg [1:0]  system_memory,
   output reg [1:0]  system_volume,
   output reg [1:0]  system_floppy_wprot,
+  output reg [1:0]  system_turbo,
   output reg	    system_hdd_wprot
 );
 
@@ -220,6 +221,7 @@ always @(posedge clk) begin
       system_memory <= 2'd1;               // 512k
       system_volume <= 2'd1;               // volume low
       system_fastboot <= 1'b0;             // normal boot
+      system_turbo <= 2'd0;                // Off (7.8 MHz) by default
       system_floppy_wprot <= 2'b11;        // both disks write protected
       system_hdd_wprot <= 1'b1;            // SCSI write protected
    end else begin // if (reset)
@@ -325,6 +327,8 @@ always @(posedge clk) begin
 		   if(id == "W") system_floppy_wprot <= data_in[1:0];
 		   // Value "X": 1x 720p(0), 2x Wide(1), Native 512x342(2)
 		   if(id == "X") system_video_mode <= data_in[1:0];
+		   // Value "T": Turbo 0=Off(7.8MHz), 1=2x(15.6MHz), 2=4x(31.3MHz), 3=Max
+		   if(id == "T") system_turbo <= data_in[1:0];
 		   // Value "S": HDD write protect enabled
 		   if(id == "S") system_hdd_wprot <= data_in[0];
 		   // Value "F": fastboot off(0) or on(1), disables rom and ram checks
