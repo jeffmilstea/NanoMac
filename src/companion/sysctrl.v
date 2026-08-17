@@ -246,7 +246,8 @@ always @(posedge clk) begin
       port_in_strobe <= 1'b0;
 
       // iack bit 0 acknowledges the coldboot notification
-      if(int_ack[0]) sys_int <= 1'b0;      
+      // Auto-clear sys_int after reset timeout (approx 3s) if MCU missed the interrupt
+      if(int_ack[0] || main_reset_timeout == 32'd1) sys_int <= 1'b0;      
 
       // (further) data has just become available, so raise interrupt
       port_out_availableD <= (port_out_available != 8'd0);
@@ -254,8 +255,8 @@ always @(posedge clk) begin
 	sys_int <= 1'b1;      
       
       // monitor buttons for changes and raise interrupt
-      // S0 + S1 emergency fallback override to 720p 1x (2'b00)
-      if (buttonsD2 == 2'b00) begin
+      // S0 + S1 emergency fallback override to 720p 1x (2'b00) on initial button press
+      if (buttonsD2 == 2'b00 && buttonsD != 2'b00) begin
          system_video_mode <= 2'b00;
       end
 

@@ -52,17 +52,6 @@ module sdram (
 assign sd_clk = ~clk;
 assign sd_cke = 1'b1;  
 
-// Return data in read state directly and afterwards latched. This makes sure
-// data is returned as fast as possible and as long as possible
-reg [15:0] doutD;  
-
-`ifdef VERILATOR
-assign dout = (state == STATE_READ && !we)?(addr[0]?sd_data_in[15:0]:sd_data_in[31:16]):doutD;
-`else
-assign dout = (state == STATE_READ && !we)?(addr[0]?sd_data[15:0]:sd_data[31:16]):doutD;
-`endif
-
-
 localparam RASCAS_DELAY   = 3'd1;   // tRCD=15ns -> 1 cycle@32MHz
 localparam BURST_LENGTH   = 3'b000; // 000=1, 001=2, 010=4, 011=8
 localparam ACCESS_TYPE    = 1'b0;   // 0=sequential, 1=interleaved
@@ -73,22 +62,25 @@ localparam NO_WRITE_BURST = 1'b1;   // 0= write burst enabled, 1=only single acc
 //                   1          1          2           3             1           3 = 11
 localparam MODE = { 1'b0, NO_WRITE_BURST, OP_MODE, CAS_LATENCY, ACCESS_TYPE, BURST_LENGTH}; 
 
-// ---------------------------------------------------------------------
-// ------------------------ cycle state machine ------------------------
-// ---------------------------------------------------------------------
-
 // The state machine runs at 32Mhz synchronous to the sync signal.
 localparam STATE_IDLE      = 3'd0;   // first state in cycle
 localparam STATE_CMD_CONT  = STATE_IDLE + RASCAS_DELAY; // command can be continued
 localparam STATE_READ      = STATE_CMD_CONT + CAS_LATENCY + 3'd1;
 localparam STATE_LAST      = STATE_READ;  // last state in cycle
-   
-// ---------------------------------------------------------------------
-// --------------------------- startup/reset ---------------------------
-// ---------------------------------------------------------------------
 
 reg [2:0] state;
 reg [4:0] init_state;
+
+// Return data in read state directly and afterwards latched. This makes sure
+// data is returned as fast as possible and as long as possible
+reg [15:0] doutD;  
+
+`ifdef VERILATOR
+assign dout = (state == STATE_READ && !we)?(addr[0]?sd_data_in[15:0]:sd_data_in[31:16]):doutD;
+`else
+assign dout = (state == STATE_READ && !we)?(addr[0]?sd_data[15:0]:sd_data[31:16]):doutD;
+`endif
+
 
 // wait 1ms (32 8Mhz cycles) after FPGA config is done before going
 // into normal operation. Initialize the ram in the last 16 reset cycles (cycles 15-0)
