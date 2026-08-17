@@ -46,7 +46,7 @@ module hdmi_mac_bridge (
     end
     
     // Active visible region: 512 pixels x 342 lines
-    wire mac_h_active = (mac_x_cnt >= 178 && mac_x_cnt < 690);
+    wire mac_h_active = (mac_x_cnt >= 184 && mac_x_cnt < 696);
     wire mac_v_active = (mac_y_cnt >= 28 && mac_y_cnt < 370);
 
     // --- GENLOCK SYNC ---
