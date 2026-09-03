@@ -7,4 +7,9 @@
 // create_clock -name clk_28m -period 35.511 -waveform {0 17.755} [get_nets {clk_sys}]
 //create_clock -name clk_hdmi -period 12.5 -waveform {0 6.25} [get_nets {clk_pixel_x5}] -add
 create_clock -name clk_osc -period 37 -waveform {0 18} [get_ports {clk}] -add
-//create_clock -name clk_spi -period 14.085 -waveform {0 7.04} [get_ports {mspi_clk}] -add
+
+// Multicycle path constraints for fx68k 68000 CPU core instruction decode (2 cycles)
+set_multicycle_path -setup -from [get_cells {*Irc* *rIrd*}] -to [get_cells {*microAddr*}] 2
+set_multicycle_path -hold  -from [get_cells {*Irc* *rIrd*}] -to [get_cells {*microAddr*}] 1
+
+
