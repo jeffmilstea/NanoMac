@@ -2,6 +2,8 @@
 #include "Vtop.h"
 #include <iostream>
 
+double sc_time_stamp() { return 0; }
+
 int main(int argc, char** argv) {
     Verilated::commandArgs(argc, argv);
     Vtop* top = new Vtop;

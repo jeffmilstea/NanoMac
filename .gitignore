@@ -7,3 +7,10 @@ src/impl/temp/**
 src/impl/pnr/**
 !src/impl/nanomac_*.json
 *.user
+.DS_Store
+*.log
+*.rej
+*.rej.*
+*.orig
+obj_dir*/
+sim/obj_dir*/

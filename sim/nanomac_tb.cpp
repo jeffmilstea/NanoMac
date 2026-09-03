@@ -399,13 +399,13 @@ void tick(int c) {
       }
     }
 
-    if(tb->phase == 6) {
-      // --------------------- ROM --------------------    
-      // check for start of rom access
-      if(!tb->_romOE)
-	// ALWAYS read rom- That way we don't have to wait for /AS
-	tb->romData = SWAP16(rom[tb->romAddr]);
+    // --------------------- ROM --------------------    
+    // check for start of rom access
+    if(!tb->_romOE)
+      // ALWAYS read rom- That way we don't have to wait for /AS
+      tb->romData = SWAP16(rom[tb->romAddr]);
 
+    if(tb->phase == 6) {
       // skip rom test
       if((simulation_time>1000000) && !tb->_romOE && ((tb->romAddr<<1)==0x18f44))
 	printf("%.3fms Sony Write trigger <------------------------- \n", simulation_time*1000);
@@ -547,6 +547,14 @@ int main(int argc, char **argv) {
   tb->uart_rxd = 1;
   tb->ram_size = RAM_SIZE;
   tb->fastboot = 1;
+  tb->turbo = 0;
+
+  for (int i = 1; i < argc; i++) {
+    if (strcmp(argv[i], "--turbo") == 0 && i + 1 < argc) {
+      tb->turbo = atoi(argv[++i]);
+    }
+  }
+  printf("NanoMac Simulation starting with Turbo mode = %d\n", tb->turbo);
   
   /* run for a while */
   while(

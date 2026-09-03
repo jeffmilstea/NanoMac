@@ -7,6 +7,7 @@ module nanomac_tb
    output reg [2:0] phase, 
 
    input [1:0]	    ram_size,
+   input [1:0]	    turbo,
    input	    fastboot,
    
    output [4:0]	    leds,
@@ -174,6 +175,7 @@ macplus macplus (
 	.configFastboot(fastboot),  // disable rom/ram check
 	.configRAMSize(ram_size),   // 128k, 512k, 1MB or 4MB
 	.configMachineType(1'b0),   // Plus, SE
+	.configTurbo(turbo),        // 0=Off, 1=2x, 2=4x, 3=Max
 	.configFloppyWProt(2'b00),  // no write protection
 
         .leds(leds),

@@ -49,6 +49,24 @@ module hdmi_mac_bridge (
     wire mac_h_active = (mac_x_cnt >= 184 && mac_x_cnt < 696);
     wire mac_v_active = (mac_y_cnt >= 28 && mac_y_cnt < 370);
 
+    // --- MAC CRT CHAMFERED CORNER MASKING ---
+    // Authentic Mac 128K/512K/Plus rounded CRT screen corners:
+    // Row 0 & 341: mask 3 pixels at left/right (x < 3 || x >= 509)
+    // Row 1 & 340: mask 2 pixels at left/right (x < 2 || x >= 510)
+    // Row 2 & 339: mask 1 pixel at left/right  (x < 1 || x >= 511)
+    reg [9:0] mac_px_q, mac_px_q2;
+    reg [9:0] mac_py_q, mac_py_q2;
+    always @(posedge hdmi_clk) begin
+        mac_px_q  <= read_x[9:0];
+        mac_px_q2 <= mac_px_q;
+        mac_py_q  <= read_y[9:0];
+        mac_py_q2 <= mac_py_q;
+    end
+
+    wire is_corner = (mac_py_q2 == 0   || mac_py_q2 == 341) ? (mac_px_q2 < 3 || mac_px_q2 >= 509) :
+                     (mac_py_q2 == 1   || mac_py_q2 == 340) ? (mac_px_q2 < 2 || mac_px_q2 >= 510) :
+                     (mac_py_q2 == 2   || mac_py_q2 == 339) ? (mac_px_q2 < 1 || mac_px_q2 >= 511) : 1'b0;
+
     // --- GENLOCK SYNC ---
     reg mac_frame_toggle = 1'b0;
     always @(posedge mac_clk) begin
@@ -152,11 +170,11 @@ module hdmi_mac_bridge (
     end
     
     wire pixel_bit = r_word[31 - read_x_q2];
-    wire [7:0] active_pixel = pixel_bit ? 8'hFF : 8'h00; // White or Black
+    wire [7:0] active_pixel = is_corner ? 8'h02 : (pixel_bit ? 8'hFF : 8'h00); // Mask corners to border color
     
-    assign hdmi_r = in_window_q2 ? active_pixel : 8'h02; // Dark blue borders
-    assign hdmi_g = in_window_q2 ? active_pixel : 8'h02;
-    assign hdmi_b = in_window_q2 ? active_pixel : 8'h10;
+    assign hdmi_r = (in_window_q2 && !is_corner) ? active_pixel : 8'h02; // Dark blue borders
+    assign hdmi_g = (in_window_q2 && !is_corner) ? active_pixel : 8'h02;
+    assign hdmi_b = (in_window_q2 && !is_corner) ? active_pixel : 8'h10;
     
     // --- AUDIO INTERPOLATOR ---
     reg [2:0] audio_stb_sync;

@@ -177,38 +177,41 @@ wire snd_alt;
 wire loadSound;
 
 // only accept /AS for ram or rom if it comes in phase 2. Don't accept any later as as we would not
-// be able to complete the bus cycle
-reg     _cpuAS_I;   
+// Memory cycle synchronization for normal and turbo modes
+wire	refreshCycle;
+wire	cpu_slot = cpuBusControl || (!loadPixels && !loadSound && !refreshCycle);
+
+reg ram_req;
+reg rom_req;
 always @(posedge clk_sys) begin
-   if(busPhase == 2) _cpuAS_I <= _cpuAS; // this allows for a full bus cycle
-   if(busPhase == 7 && _cpuAS) _cpuAS_I <= 1'b1;
+   if (!_cpuReset || _cpuAS) begin
+      ram_req <= 1'b0;
+      rom_req <= 1'b0;
+   end else begin
+      if ((busPhase == 3'd2 || busPhase == 3'd3) && selectRAM && cpu_slot)
+         ram_req <= 1'b1;
+      if ((busPhase == 3'd1 || busPhase == 3'd2 || busPhase == 3'd3) && selectROM)
+         rom_req <= 1'b1;
+   end
 end
 
-wire _cpuAS_R = !(!_cpuAS && !_cpuAS_I);   
-   
 assign      _cpuVPA = (cpuFC == 3'b111) ? 1'b0 : ~(!_cpuAS && selectVIA);
 
-// only ram access limited to CPU cycle. Everything else also in video cycle
-// furthermore allow cpu ram access in unused video cycles.
-wire	refreshCycle;
-   
-// Make sure, we never end a memory cycle before the memory was able to return data
 // Turbo Mode Clock & DTACK Logic:
 // configTurbo = 0: Off (7.8 MHz)
 // configTurbo = 1: 2x (15.6 MHz)
-// configTurbo = 2: 4x (31.3 MHz via continuous execution)
-// configTurbo = 3: Max Turbo (Zero wait state ROM & continuous execution)
 wire cpu_turbo_active = (configTurbo != 2'b00);
-wire cpu_turbo_max    = (configTurbo == 2'b11);
 
-wire turbo_enPhi1 = cpu_turbo_active ? 1'b1 : clk8_en_p;
-wire turbo_enPhi2 = cpu_turbo_active ? 1'b1 : clk8_en_n;
+// Two-Phase Alternating 16MHz Clock Enable
+// Strictly preserves fx68k two-phase non-overlapping clock contract
+// Off (7.8MHz): enPhi1 = clk8_en_p, enPhi2 = clk8_en_n (8MHz pulses)
+// Turbo (15.6MHz): Alternates enPhi1 = busPhase[0] and enPhi2 = !busPhase[0] on every 16MHz clock edge
+wire turbo_enPhi1 = cpu_turbo_active ? busPhase[0]  : clk8_en_p;
+wire turbo_enPhi2 = cpu_turbo_active ? !busPhase[0] : clk8_en_n;
 
-wire	cpuBusCycleDone = cpu_turbo_active ? 1'b1 : (busPhase >= 4);
-wire	cpuOnVideoBusControl = !loadPixels && !loadSound && !refreshCycle && videoBusControl && !_cpuAS && selectRAM;   
-assign      _cpuDTACK = ~((!_cpuAS_R && selectRAM && cpuBusControl && cpuBusCycleDone) ||
-			  (!_cpuAS_R && selectRAM && cpuOnVideoBusControl && cpuBusCycleDone) ||
-			  (!_cpuAS_R && selectROM && (cpuBusCycleDone || cpu_turbo_max)) ||
+wire	cpuBusCycleDone = cpu_turbo_active ? (busPhase >= 6) : (busPhase >= 4);
+assign      _cpuDTACK = ~((!_cpuAS && ram_req && cpuBusCycleDone) ||
+			  (!_cpuAS && rom_req && cpuBusCycleDone) ||
                           (!_cpuAS && !selectVIA && !selectRAM && !selectROM)); // everything else but the VIA
 
 fx68k fx68k (
