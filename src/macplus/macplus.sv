@@ -86,7 +86,16 @@ module macplus
 	output [1:0]	       sdram_ds,
 	output		       sdram_we,
 	output		       sdram_oe,
-	input [15:0]	       sdram_do
+	input [15:0]	       sdram_do,
+
+	// ILA / ICE debug probe and execution control interface
+	output [47:0]	       mac_probes,
+	output		       _cpuAS_probe,
+	output		       enPhi1_raw,
+	output		       enPhi2_raw,
+	input		       enPhi1_gated,
+	input		       enPhi2_gated,
+	input		       cpu_reset_override
 );
 
 assign ADC_BUS  = 'Z;
@@ -209,6 +218,36 @@ wire cpu_turbo_active = (configTurbo != 2'b00);
 wire turbo_enPhi1 = cpu_turbo_active ? busPhase[0]  : clk8_en_p;
 wire turbo_enPhi2 = cpu_turbo_active ? !busPhase[0] : clk8_en_n;
 
+assign enPhi1_raw = turbo_enPhi1;
+assign enPhi2_raw = turbo_enPhi2;
+assign _cpuAS_probe = _cpuAS;
+
+assign mac_probes = {
+    cpuAddr[23:1], 1'b0, // [47:24] 24-bit CPU address
+    _cpuVMA,             // [23]
+    _cpuVPA,             // [22]
+    selectVIA,           // [21]
+    selectROM,           // [20]
+    selectRAM,           // [19]
+    refreshCycle,        // [18]
+    loadSound,           // [17]
+    loadPixels,          // [16]
+    videoBusControl,     // [15]
+    cpuBusControl,       // [14]
+    cpu_slot,            // [13]
+    rom_req,             // [12]
+    ram_req,             // [11]
+    _cpuDTACK,           // [10]
+    _cpuRW,              // [9]
+    _cpuLDS,             // [8]
+    _cpuUDS,             // [7]
+    _cpuAS,              // [6]
+    cpu_turbo_active,    // [5]
+    enPhi2_gated,        // [4]
+    enPhi1_gated,        // [3]
+    busPhase[2:0]        // [2:0]
+};
+
 wire	cpuBusCycleDone = cpu_turbo_active ? (busPhase >= 6) : (busPhase >= 4);
 assign      _cpuDTACK = ~((!_cpuAS && ram_req && cpuBusCycleDone) ||
 			  (!_cpuAS && rom_req && cpuBusCycleDone) ||
@@ -216,10 +255,10 @@ assign      _cpuDTACK = ~((!_cpuAS && ram_req && cpuBusCycleDone) ||
 
 fx68k fx68k (
 	.clk        ( clk_sys ),
-	.extReset   ( !_cpuReset ),
-	.pwrUp      ( !_cpuReset ),
-	.enPhi1     ( turbo_enPhi1 ),
-	.enPhi2     ( turbo_enPhi2 ),
+	.extReset   ( (!_cpuReset) || cpu_reset_override ),
+	.pwrUp      ( (!_cpuReset) || cpu_reset_override ),
+	.enPhi1     ( enPhi1_gated ),
+	.enPhi2     ( enPhi2_gated ),
 
 	.eRWn       ( _cpuRW ),
 	.ASn        ( _cpuAS ),

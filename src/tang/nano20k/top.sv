@@ -174,6 +174,8 @@ wire [7:0] sys_data_out;
 wire [7:0] hid_data_out;  
 wire [7:0] osd_data_out = 8'h55;  // OSD actually has no data output
 wire [7:0] sdc_data_out;
+wire [7:0] ila_data_out;
+wire       mcu_ila_strobe;
 
 mcu_spi mcu (
 	 .clk(clk_pixel),
@@ -190,12 +192,50 @@ mcu_spi mcu (
      .mcu_hid_strobe(mcu_hid_strobe),
      .mcu_osd_strobe(mcu_osd_strobe),
      .mcu_sdc_strobe(mcu_sdc_strobe),
+     .mcu_ila_strobe(mcu_ila_strobe),
      .mcu_start(mcu_start),
      .mcu_dout(mcu_data_out),
      .mcu_sys_din(sys_data_out),
      .mcu_hid_din(hid_data_out),
      .mcu_osd_din(osd_data_out),
-     .mcu_sdc_din(sdc_data_out)
+     .mcu_sdc_din(sdc_data_out),
+     .mcu_ila_din(ila_data_out)
+);
+
+// -----------------------------------------------------------------------------
+// On-Chip ILA & ICE Debugger Core
+// -----------------------------------------------------------------------------
+wire [47:0] mac_probes;
+wire        _cpuAS_probe;
+wire        enPhi1_raw, enPhi2_raw;
+wire        enPhi1_gated, enPhi2_gated;
+wire        cpu_reset_override;
+
+wire [63:0] ila_probes = {
+    sdram_dout[15:8],     // [63:56] upper data bus byte
+    mac_probes[47:24],    // [55:32] 24-bit cpuAddr
+    ram_ready,            // [31]
+    sdram_oe,             // [30]
+    sdram_we,             // [29]
+    phase,                // [28:26] SDRAM phase
+    2'b00,                // [25:24] spares
+    mac_probes[23:0]      // [23:0]  CPU control, phases, enables
+};
+
+ila ila_inst (
+    .clk                ( clk_pixel          ),
+    .reset              ( !pll_lock          ),
+    .enPhi1_in          ( enPhi1_raw         ),
+    .enPhi2_in          ( enPhi2_raw         ),
+    .enPhi1_out         ( enPhi1_gated       ),
+    .enPhi2_out         ( enPhi2_gated       ),
+    .cpu_reset_override ( cpu_reset_override ),
+    .probes             ( ila_probes         ),
+    ._cpuAS             ( _cpuAS_probe       ),
+    .strobe             ( mcu_ila_strobe     ),
+    .start              ( mcu_start          ),
+    .din                ( mcu_data_out       ),
+    .dout               ( ila_data_out       )
 );
 
 // decode SPI/MCU data received for human input devices (HID) and
@@ -558,7 +598,16 @@ macplus macplus (
     .UART_CTS( 1'b1 ),
 	.UART_RTS(),
     .UART_RXD( uart_rxd ),
-    .UART_TXD( uart_txd )
+    .UART_TXD( uart_txd ),
+
+    // ILA / ICE debug probe and execution control
+    .mac_probes( mac_probes ),
+    ._cpuAS_probe( _cpuAS_probe ),
+    .enPhi1_raw( enPhi1_raw ),
+    .enPhi2_raw( enPhi2_raw ),
+    .enPhi1_gated( enPhi1_gated ),
+    .enPhi2_gated( enPhi2_gated ),
+    .cpu_reset_override( cpu_reset_override )
 );
 
 wire [5:0] leds;

@@ -19,11 +19,13 @@ module mcu_spi (
   output       mcu_hid_strobe, // byte strobe for HID target  
   output       mcu_osd_strobe, // byte strobe for OSD target
   output       mcu_sdc_strobe, // byte strobe for SD card target
+  output       mcu_ila_strobe, // byte strobe for ILA target
   output       mcu_start,
   input  [7:0] mcu_sys_din,
   input  [7:0] mcu_hid_din,
   input  [7:0] mcu_osd_din,
   input  [7:0] mcu_sdc_din,
+  input  [7:0] mcu_ila_din,
   output [7:0] mcu_dout
 );
    
@@ -44,7 +46,7 @@ always @(negedge spi_io_clk or posedge spi_io_ss) begin
     if(spi_io_ss) begin
         spi_cnt <= 4'd0;
     end else begin
-        // lower 3 bits cound bits, upper 8 bits count bytes
+        // lower 3 bits count bits, upper 8 bits count bytes
         spi_cnt <= spi_cnt + 4'd1;
 
         // shift bit in
@@ -67,14 +69,13 @@ always @(negedge spi_io_clk or posedge spi_io_ss) begin
 end // always @ (negedge spi_io_clk or posedge spi_io_ss)
    
 // bring received byte into local clock domain
-
-  
 reg spi_in_strobe;
 reg [7:0] spi_target;
 assign mcu_sys_strobe = spi_in_strobe && spi_target == 8'd0;
 assign mcu_hid_strobe = spi_in_strobe && spi_target == 8'd1;
 assign mcu_osd_strobe = spi_in_strobe && spi_target == 8'd2; 
 assign mcu_sdc_strobe = spi_in_strobe && spi_target == 8'd3; 
+assign mcu_ila_strobe = spi_in_strobe && spi_target == 8'd5; 
 
 reg [7:0] spi_in_data;
 assign mcu_start = spi_in_cnt == 2;  
@@ -82,11 +83,25 @@ assign mcu_dout = spi_in_data;
      
 reg [3:0] spi_in_cnt;
 
+// Asynchronous CS deassertion capture to prevent dropping short pulses (<64ns)
+reg ss_pulse_async;
+reg ss_pulse_ack;
+always @(posedge spi_io_ss or posedge ss_pulse_ack) begin
+    if (ss_pulse_ack)
+        ss_pulse_async <= 1'b0;
+    else
+        ss_pulse_async <= 1'b1;
+end
+
+reg [1:0] ss_pulse_sync;
 always @(posedge clk) begin
    reg [1:0] spi_data_in_readyD;
    spi_data_in_readyD <= { spi_data_in_readyD[0], spi_data_in_ready };
    
-   if(spi_io_ss)
+   ss_pulse_sync <= { ss_pulse_sync[0], ss_pulse_async };
+   ss_pulse_ack  <= ss_pulse_sync[1];
+
+   if(spi_io_ss || ss_pulse_sync[1])
       spi_in_cnt <= 4'd0;
    
    if(spi_data_in_readyD == 2'b01) begin
@@ -111,6 +126,7 @@ wire [7:0] in_byte =
 	   (spi_target == 8'd1)?mcu_hid_din:
 	   (spi_target == 8'd2)?mcu_osd_din:
 	   (spi_target == 8'd3)?mcu_sdc_din:
+	   (spi_target == 8'd5)?mcu_ila_din:
 	   8'h00;   
    
 // setup data on rising edge of spi clock
