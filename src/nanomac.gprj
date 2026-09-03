@@ -7,6 +7,7 @@
     <FileList>
         <File path="companion/hid.v" type="file.verilog" enable="1"/>
         <File path="companion/ila.sv" type="file.verilog" enable="1"/>
+        <File path="companion/ila_uart.sv" type="file.verilog" enable="1"/>
         <File path="companion/macplus_keymap.v" type="file.verilog" enable="1"/>
         <File path="companion/mcu_spi.v" type="file.verilog" enable="1"/>
         <File path="companion/osd_u8g2.v" type="file.verilog" enable="1"/>

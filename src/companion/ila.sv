@@ -29,7 +29,11 @@ module ila (
     input               strobe,         // Byte strobe
     input               start,          // First byte of message
     input  [7:0]        din,            // Byte from MCU
-    output reg [7:0]    dout            // Byte to MCU
+    output reg [7:0]    dout,           // Byte to MCU
+
+    // Direct hardware UART pins (FT2232 Channel 1)
+    input               uart_rx,
+    output              uart_tx
 );
 
     // -------------------------------------------------------------------------
@@ -75,7 +79,21 @@ module ila (
             if (ice_reset_timer != 8'd0)
                 ice_reset_timer <= ice_reset_timer - 8'd1;
 
-            if (ice_cmd_strobe) begin
+            if (uart_halt_req) begin
+                halted <= 1'b1; // Halt from UART
+            end else if (uart_resume_req) begin
+                halted         <= 1'b0; // Resume from UART
+                step_clock_cnt <= 16'd0;
+                step_bus_cnt   <= 16'd0;
+            end else if (uart_reset_req) begin
+                ice_reset_timer <= 8'd255; // Reset from UART
+            end else if (uart_step_clock_req) begin
+                step_clock_cnt <= uart_step_val;
+                halted         <= 1'b0;
+            end else if (uart_step_bus_req) begin
+                step_bus_cnt   <= uart_step_val;
+                halted         <= 1'b0;
+            end else if (ice_cmd_strobe) begin
                 case (ice_subcmd)
                     8'd0: halted <= 1'b1; // Halt
                     8'd1: begin           // Resume
@@ -171,14 +189,14 @@ module ila (
 
     // Circular capture logic
     always @(posedge clk) begin
-        if (reset || ila_disarm_req) begin
+        if (reset || ila_disarm_req || uart_disarm_req) begin
             ila_state     <= ILA_IDLE;
             wr_ptr        <= 0;
             pre_count     <= 0;
             post_count    <= 0;
             trigger_pos   <= 0;
             force_trigger <= 1'b0;
-        end else if (ila_arm_req) begin
+        end else if (ila_arm_req || uart_arm_req) begin
             ila_state     <= ILA_ARM_PRE;
             wr_ptr        <= 0;
             pre_count     <= 0;
@@ -186,7 +204,7 @@ module ila (
             trigger_pos   <= 0;
             force_trigger <= 1'b0;
         end else begin
-            if (force_trig_req)
+            if (force_trig_req || uart_force_trig_req)
                 force_trigger <= 1'b1;
             else if (force_trigger)
                 force_trigger <= 1'b0;
@@ -262,6 +280,8 @@ module ila (
             ila_disarm_req  <= 1'b0;
             force_trig_req  <= 1'b0;
         end else begin
+            if (uart_arm_req)
+                trig_mode <= uart_trig_mode;
             if (ice_cmd_strobe)
                 ice_cmd_strobe <= 1'b0;
             if (ila_arm_req)
@@ -405,5 +425,52 @@ module ila (
             end
         end
     end
+
+    // -------------------------------------------------------------------------
+    // 4. Hardware UART Controller (FT2232 Channel 1 on Pins 69/70)
+    // -------------------------------------------------------------------------
+    wire [8:0]  trace_rd_addr_uart;
+    wire [63:0] trace_rd_data_uart = trace_ram[trace_rd_addr_uart];
+
+    wire        uart_halt_req;
+    wire        uart_resume_req;
+    wire        uart_reset_req;
+    wire        uart_step_clock_req;
+    wire        uart_step_bus_req;
+    wire [15:0] uart_step_val;
+    wire        uart_arm_req;
+    wire        uart_disarm_req;
+    wire        uart_force_trig_req;
+    wire [2:0]  uart_trig_mode;
+
+    ila_uart #(
+        .CLK_FREQ(15667200),
+        .BAUD_RATE(2000000),
+        .DIVISOR(8)
+    ) ila_uart_inst (
+        .clk(clk),
+        .reset(reset),
+        .rx_pin(uart_rx),
+        .tx_pin(uart_tx),
+        .probes(probes),
+        .halted(halted),
+        .stepping_clocks(stepping_clocks),
+        .stepping_bus(stepping_bus),
+        .ila_state(ila_state),
+        .wr_ptr(wr_ptr),
+        .trigger_pos(trigger_pos),
+        .trace_rd_addr(trace_rd_addr_uart),
+        .trace_rd_data(trace_rd_data_uart),
+        .uart_halt_req(uart_halt_req),
+        .uart_resume_req(uart_resume_req),
+        .uart_reset_req(uart_reset_req),
+        .uart_step_clock_req(uart_step_clock_req),
+        .uart_step_bus_req(uart_step_bus_req),
+        .uart_step_val(uart_step_val),
+        .uart_arm_req(uart_arm_req),
+        .uart_disarm_req(uart_disarm_req),
+        .uart_force_trig_req(uart_force_trig_req),
+        .uart_trig_mode(uart_trig_mode)
+    );
 
 endmodule

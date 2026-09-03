@@ -44,7 +44,9 @@ module top(
   input                 spi_csn,
   output                spi_dir,
   input                 spi_dat,
-  output                spi_irqn,
+  // UART connection to on-board FT2232 / BL702 (USB-C)
+  output                uart_tx,
+  input                 uart_rx,
 
   // SD card slot
   output		sd_clk,
@@ -125,6 +127,7 @@ wire cpu_reset = |reset_cnt;
 // din, ss and clk are inputs coming from the MCU
 // onboard connection to on-board BL616
 
+wire spi_irqn;
 assign spi_dir = spi_io_dout;
 assign m0s = { spi_irqn, 3'bzzz, spi_io_dout };
 
@@ -235,7 +238,9 @@ ila ila_inst (
     .strobe             ( mcu_ila_strobe     ),
     .start              ( mcu_start          ),
     .din                ( mcu_data_out       ),
-    .dout               ( ila_data_out       )
+    .dout               ( ila_data_out       ),
+    .uart_rx            ( uart_rx            ),
+    .uart_tx            ( uart_tx            )
 );
 
 // decode SPI/MCU data received for human input devices (HID) and

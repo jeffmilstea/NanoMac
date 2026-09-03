@@ -33,6 +33,7 @@ add_file companion/hid.v
 add_file companion/macplus_keymap.v
 add_file companion/osd_u8g2.v
 add_file companion/ila.sv
+add_file companion/ila_uart.sv
 
 add_file misc/video_analyzer.v
 add_file misc/ws2812.v
