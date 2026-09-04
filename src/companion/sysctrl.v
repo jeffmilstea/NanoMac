@@ -255,8 +255,9 @@ always @(posedge clk) begin
 	sys_int <= 1'b1;      
       
       // monitor buttons for changes and raise interrupt
-      // S0 + S1 emergency fallback override to 720p 1x (2'b00) on initial button press
-      if (buttonsD2 == 2'b00 && buttonsD != 2'b00) begin
+      // S0 + S1 emergency fallback override to 720p 1x (2'b00) ONLY when BOTH buttons are held simultaneously (2'b11)
+      // DO NOT trigger on single button press (e.g. S1 OSD button), or it will clobber 2x Wide / Native modes
+      if (buttonsD2 != 2'b11 && buttonsD == 2'b11) begin
          system_video_mode <= 2'b00;
       end
 
