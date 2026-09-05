@@ -9,8 +9,8 @@ if [ ! -f "$BITSTREAM" ]; then
     exit 1
 fi
 
-echo "Flashing bitstream $BITSTREAM to Tang Nano 20K (Mode: $MODE)..."
-OUTPUT=$(openFPGALoader -b tangnano20k $MODE "$BITSTREAM" --verbose-level 2 --freq 2500000 2>&1)
+echo "Flashing bitstream $BITSTREAM to Tang Nano 20K (Mode: $MODE with -r reset)..."
+OUTPUT=$(openFPGALoader -b tangnano20k $MODE "$BITSTREAM" -r --verbose-level 2 --freq 2500000 2>&1)
 EXIT_CODE=$?
 
 echo "$OUTPUT"
@@ -23,7 +23,7 @@ fi
 echo "WARNING: Initial programming attempt did not confirm 100% completion. Retrying in 2 seconds..."
 sleep 2
 
-OUTPUT_RETRY=$(openFPGALoader -b tangnano20k $MODE "$BITSTREAM" --verbose-level 2 --freq 2500000 2>&1)
+OUTPUT_RETRY=$(openFPGALoader -b tangnano20k $MODE "$BITSTREAM" -r --verbose-level 2 --freq 2500000 2>&1)
 EXIT_CODE_RETRY=$?
 
 echo "$OUTPUT_RETRY"

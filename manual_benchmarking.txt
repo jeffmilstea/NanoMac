@@ -30,3 +30,15 @@ Iterations = 3
 
 Restart to Desktop Screen (no wristwatch mouse pointer)
  7.16Mhz = 20.18,19.70
+
+========================
+After adding ILA and _cpuDTACK is now asserting at Phase 4:
+
+Speedometer 4.02 Sieve tests:
+Iterations = 3
+  Abs = 30.240, Rat = 0.045 = 15.6Mhz
+
+Speedometer 4.02 Sieve tests:
+Iterations = 3
+  Abs = 30.238, Rat = 0.045 = 7.16Mhz
+  Abs = 30.268, Rat = 0.045 = 7.16Mhz  (Speedometer quit cleanly with no freeze/bomb after restricting ram_req/rom_req to busPhase == 2)

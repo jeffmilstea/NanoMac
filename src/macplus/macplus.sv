@@ -197,9 +197,9 @@ always @(posedge clk_sys) begin
       ram_req <= 1'b0;
       rom_req <= 1'b0;
    end else begin
-      if ((busPhase == 3'd2 || busPhase == 3'd3) && selectRAM && cpu_slot)
+      if (busPhase == 3'd2 && selectRAM && cpu_slot)
          ram_req <= 1'b1;
-      if ((busPhase == 3'd1 || busPhase == 3'd2 || busPhase == 3'd3) && selectROM)
+      if (busPhase == 3'd2 && selectROM)
          rom_req <= 1'b1;
    end
 end
@@ -248,7 +248,7 @@ assign mac_probes = {
     busPhase[2:0]        // [2:0]
 };
 
-wire	cpuBusCycleDone = cpu_turbo_active ? (busPhase >= 6) : (busPhase >= 4);
+wire	cpuBusCycleDone = (busPhase >= 4);
 assign      _cpuDTACK = ~((!_cpuAS && ram_req && cpuBusCycleDone) ||
 			  (!_cpuAS && rom_req && cpuBusCycleDone) ||
                           (!_cpuAS && !selectVIA && !selectRAM && !selectROM)); // everything else but the VIA
