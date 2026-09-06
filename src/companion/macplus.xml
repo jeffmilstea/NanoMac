@@ -71,9 +71,7 @@
       </list>
       <list label="Turbo:" id="T" default="0">
 	<listentry label="Off (7.8MHz)" value="0"/>
-	<listentry label="2x (15.6MHz)" value="1"/>
-	<listentry label="4x (31.3MHz)" value="2"/>
-	<listentry label="Max Turbo"   value="3"/>
+	<listentry label="On (19.6MHz)"  value="1"/>
       </list>
       <button label="Save settings" action="save"/>
     </menu>    

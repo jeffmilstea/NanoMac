@@ -21,8 +21,9 @@
 
 module macplus
 (
-	//Master input clock
+	//Master input clocks
 	input		       CLKIN,
+	input		       CLKCPU,
 
 	//Async reset from top-level module.
 	//Can be used as initial reset.
@@ -103,6 +104,7 @@ assign ADC_BUS  = 'Z;
 ////////////////////   CLOCKS   ///////////////////
 
 wire clk_sys = CLKIN;
+wire clk_cpu = CLKCPU;
 
 wire clk8_en_p, clk8_en_n;
 wire videoBusControl;
@@ -166,7 +168,6 @@ assign UART_RTS = serialRTS;
 wire _cpuReset, _cpuReset_o, _cpuUDS, _cpuLDS, _cpuRW;
 wire _cpuAS;
 wire _cpuVMA, _cpuVPA, _cpuDTACK;
-wire E_rising, E_falling;
 wire [2:0] _cpuIPL;
 wire [2:0] cpuFC;
 wire [23:1] cpuAddr;
@@ -192,35 +193,111 @@ wire	cpu_slot = cpuBusControl || (!loadPixels && !loadSound && !refreshCycle);
 
 reg ram_req;
 reg rom_req;
-always @(posedge clk_sys) begin
-   if (!_cpuReset || _cpuAS) begin
-      ram_req <= 1'b0;
-      rom_req <= 1'b0;
+reg io_req;
+reg io_synced;
+reg [2:0] io_sync_cnt;
+
+wire req_rst = !_cpuReset || _cpuAS;
+always @(posedge clk_sys or posedge req_rst) begin
+   if (req_rst) begin
+      ram_req     <= 1'b0;
+      rom_req     <= 1'b0;
+      io_req      <= 1'b0;
+      io_synced   <= 1'b0;
+      io_sync_cnt <= 3'd0;
    end else begin
       if (busPhase == 3'd2 && selectRAM && cpu_slot)
          ram_req <= 1'b1;
       if (busPhase == 3'd2 && selectROM)
          rom_req <= 1'b1;
+      if (cpuFC != 3'b111 && !selectVIA && !selectRAM && !selectROM) begin
+         io_req <= 1'b1;
+         if (clk8_en_n) begin
+            if (io_sync_cnt < 3'd3)
+               io_sync_cnt <= io_sync_cnt + 3'd1;
+            if (_cpuRW ? (io_sync_cnt >= 3'd1) : (io_sync_cnt >= 3'd2))
+               io_synced <= 1'b1;
+         end
+      end
    end
 end
 
 assign      _cpuVPA = (cpuFC == 3'b111) ? 1'b0 : ~(!_cpuAS && selectVIA);
 
 // Turbo Mode Clock & DTACK Logic:
-// configTurbo = 0: Off (7.8 MHz)
-// configTurbo = 1: 2x (15.6 MHz)
+// configTurbo = 0: Off (Stock 7.8336 MHz)
+// configTurbo != 0: Turbo (19.584 MHz nominal, 2.50x speedup)
 wire cpu_turbo_active = (configTurbo != 2'b00);
 
-// Two-Phase Alternating 16MHz Clock Enable
-// Strictly preserves fx68k two-phase non-overlapping clock contract
-// Off (7.8MHz): enPhi1 = clk8_en_p, enPhi2 = clk8_en_n (8MHz pulses)
-// Turbo (15.6MHz): Alternates enPhi1 = busPhase[0] and enPhi2 = !busPhase[0] on every 16MHz clock edge
-wire turbo_enPhi1 = cpu_turbo_active ? busPhase[0]  : clk8_en_p;
-wire turbo_enPhi2 = cpu_turbo_active ? !busPhase[0] : clk8_en_n;
+// -------------------------------------------------------------------------
+// CPU Clock Enable & Turbo Mode Generator
+// -------------------------------------------------------------------------
+// In Stock Mode (configTurbo == 0):
+//   clk_cpu is clk_pixel (15.6672 MHz) via DCS in top.sv.
+//   enPhi1 is clk8_en_p (Phase 1, 3, 5, 7)
+//   enPhi2 is clk8_en_n (Phase 0, 2, 4, 6)
+// In Turbo Mode (configTurbo != 0):
+//   clk_cpu is clk_cpu_raw (39.168 MHz) via DCS in top.sv.
+//   enPhi1 and enPhi2 alternate every cycle -> 19.584 MHz (2.50x nominal speedup)
+reg turbo_phase = 1'b0;
+always @(posedge clk_cpu) begin
+    if (!cpu_turbo_active) begin
+        // Keep turbo_phase aligned with Stock mode Phase 7:
+        // When turbo_synced activates at Phase 7, the first cycle into Phase 0
+        // toggles from 1 to 0 -> turbo_enPhi2 = 1, ensuring seamless alternation.
+        turbo_phase <= 1'b1;
+    end else begin
+        turbo_phase <= !turbo_phase;
+    end
+end
 
-assign enPhi1_raw = turbo_enPhi1;
-assign enPhi2_raw = turbo_enPhi2;
+wire turbo_enPhi1 = turbo_phase;
+wire turbo_enPhi2 = !turbo_phase;
+
+wire gen_enPhi1 = cpu_turbo_active ? turbo_enPhi1 : clk8_en_p;
+wire gen_enPhi2 = cpu_turbo_active ? turbo_enPhi2 : clk8_en_n;
+
+assign enPhi1_raw = gen_enPhi1;
+assign enPhi2_raw = gen_enPhi2;
 assign _cpuAS_probe = _cpuAS;
+
+// -------------------------------------------------------------------------
+// VIA 6522 E-Clock Strobe Synchronizer
+// -------------------------------------------------------------------------
+// In Stock Mode: fx68k.E_PosClkEn / fx68k.E_NegClkEn are directly on clk_sys.
+// In Turbo Mode: fx68k is on clk_cpu (39.168 MHz), so toggle synchronizer bridges
+// the single-cycle E-clock phase enables cleanly into the clk_sys domain.
+wire fx68k_e_pos, fx68k_e_neg;
+
+reg e_pos_toggle = 1'b0;
+reg e_neg_toggle = 1'b0;
+always @(posedge clk_cpu or negedge _cpuReset) begin
+    if (!_cpuReset) begin
+        e_pos_toggle <= 1'b0;
+        e_neg_toggle <= 1'b0;
+    end else begin
+        if (fx68k_e_pos) e_pos_toggle <= ~e_pos_toggle;
+        if (fx68k_e_neg) e_neg_toggle <= ~e_neg_toggle;
+    end
+end
+
+reg [2:0] e_pos_sync = 3'b000;
+reg [2:0] e_neg_sync = 3'b000;
+always @(posedge clk_sys or negedge _cpuReset) begin
+    if (!_cpuReset) begin
+        e_pos_sync <= 3'b000;
+        e_neg_sync <= 3'b000;
+    end else begin
+        e_pos_sync <= {e_pos_sync[1:0], e_pos_toggle};
+        e_neg_sync <= {e_neg_sync[1:0], e_neg_toggle};
+    end
+end
+
+wire turbo_e_rising  = (e_neg_sync[2] ^ e_neg_sync[1]);
+wire turbo_e_falling = (e_pos_sync[2] ^ e_pos_sync[1]);
+
+wire via_e_rising  = cpu_turbo_active ? turbo_e_rising  : fx68k_e_neg;
+wire via_e_falling = cpu_turbo_active ? turbo_e_falling : fx68k_e_pos;
 
 assign mac_probes = {
     cpuAddr[23:1], 1'b0, // [47:24] 24-bit CPU address
@@ -248,13 +325,25 @@ assign mac_probes = {
     busPhase[2:0]        // [2:0]
 };
 
-wire	cpuBusCycleDone = (busPhase >= 4);
-assign      _cpuDTACK = ~((!_cpuAS && ram_req && cpuBusCycleDone) ||
-			  (!_cpuAS && rom_req && cpuBusCycleDone) ||
-                          (!_cpuAS && !selectVIA && !selectRAM && !selectROM)); // everything else but the VIA
+// DTACK completion conditions:
+// In Stock Mode (7.83 MHz): CPU states are 63.8ns long. Sampling in S5 (Phase 5) means S6 (data latch)
+// occurs at Phase 6. Asserting DTACK at Phase 4 is standard for Stock.
+// In Turbo Mode (19.58 MHz): CPU states are 25.5ns long. RAM reads must wait until busPhase >= 6
+// when SDRAM dout is guaranteed valid. RAM writes can complete at busPhase >= 4.
+// ROM reads can complete at busPhase >= 4 (SPI flash controller ready).
+// All other non-VIA accesses (and non-IACK) wait for io_done.
+wire ram_done = cpu_turbo_active ? (busPhase >= 3'd7) : (busPhase >= 3'd4);
+
+wire rom_done = cpu_turbo_active ? (busPhase >= 3'd7) : (busPhase >= 3'd4);
+
+wire io_done  = cpu_turbo_active ? io_synced : 1'b1;
+
+assign _cpuDTACK = ~((!_cpuAS && ram_req && ram_done) ||
+                     (!_cpuAS && rom_req && rom_done) ||
+                     (!_cpuAS && (cpuFC != 3'b111) && !selectVIA && !selectRAM && !selectROM && io_done));
 
 fx68k fx68k (
-	.clk        ( clk_sys ),
+	.clk        ( clk_cpu ),
 	.extReset   ( (!_cpuReset) || cpu_reset_override ),
 	.pwrUp      ( (!_cpuReset) || cpu_reset_override ),
 	.enPhi1     ( enPhi1_gated ),
@@ -266,8 +355,8 @@ fx68k fx68k (
 	.UDSn       ( _cpuUDS ),
 	.E          ( ),
 	.E_div      ( 1'b0 ),
-	.E_PosClkEn ( E_falling ),
-	.E_NegClkEn ( E_rising ),
+	.E_PosClkEn ( fx68k_e_pos ),
+	.E_NegClkEn ( fx68k_e_neg ),
 	.VMAn       ( _cpuVMA ),
 	.FC0        ( cpuFC[0] ),
 	.FC1        ( cpuFC[1] ),
@@ -349,8 +438,8 @@ dataController #(SCSI_DEVS) dc0
 	.clk(clk_sys), 
 	.clk8_en_p(clk8_en_p),
 	.clk8_en_n(clk8_en_n),
-	.E_rising(E_rising),
-	.E_falling(E_falling),
+	.E_rising(via_e_rising),
+	.E_falling(via_e_falling),
 	.machineType(configMachineType),
 	.floppy_wprot(configFloppyWProt),
 	.scsi_wprot(configSCSIWProt),

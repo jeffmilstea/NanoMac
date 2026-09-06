@@ -42,3 +42,23 @@ Speedometer 4.02 Sieve tests:
 Iterations = 3
   Abs = 30.238, Rat = 0.045 = 7.16Mhz
   Abs = 30.268, Rat = 0.045 = 7.16Mhz  (Speedometer quit cleanly with no freeze/bomb after restricting ram_req/rom_req to busPhase == 2)
+
+Speedometer 4.02 Sieve tests:
+Iterations = 3
+  Abs = 70.135, Rat = 0.019 = 15.6Mhz (after IWM and 6522 fixes)
+
+Speedometer 4.02 Sieve tests:
+Iterations = 3
+  Abs = 30.241, Rat = 0.045 = 15.6Mhz (after latest fixes)
+
+Before starting the caching work, with live speed switching FINALLY working:
+
+Speedometer 4.02 Sieve tests:
+Iterations = 3
+  Abs = 70.653, Rat = 0.018 = 19.6Mhz
+  Abs = 30.251, Rat = 0.045 =  7.8Mhz
+
+Speedometer 4.02 CPU tests:
+Iterations = 1
+  CPU = 0.021, Math = 0.062 = 19.6Mhz
+  CPU = 0.054, Math = 0.146 =  7.8Mhz

@@ -251,6 +251,7 @@ module ila_uart #(
 
     reg        print_after_step;
     reg [63:0] sample_latch;
+    reg [19:0] step_timeout;
 
     always @(posedge clk) begin
         if (reset) begin
@@ -275,6 +276,7 @@ module ila_uart #(
             dump_col            <= 0;
             trace_rd_addr       <= 0;
             print_after_step    <= 0;
+            step_timeout        <= 0;
         end else begin
             // Default strobes
             uart_halt_req       <= 0;
@@ -302,18 +304,18 @@ module ila_uart #(
                                 dump_col     <= 0;
                                 state        <= S_PRINT_STAT;
                             end
-                            8'h48: begin // 'H' -> Halt
+                            8'h48: begin // 'H' -> Halt CPU
                                 uart_halt_req <= 1'b1;
                                 msg_sel       <= 1;
                                 msg_idx       <= 0;
-                                msg_len       <= 16;
+                                msg_len       <= 14;
                                 state         <= S_PRINT_MSG;
                             end
-                            8'h72: begin // 'r' -> Resume
+                            8'h72: begin // 'r' -> Resume CPU
                                 uart_resume_req <= 1'b1;
                                 msg_sel         <= 2;
                                 msg_idx         <= 0;
-                                msg_len         <= 17;
+                                msg_len         <= 16;
                                 state           <= S_PRINT_MSG;
                             end
                             8'h52, 8'h7A: begin // 'R' or 'z' -> Reset CPU
@@ -327,18 +329,21 @@ module ila_uart #(
                                 uart_step_clock_req <= 1'b1;
                                 uart_step_val       <= 16'd1;
                                 print_after_step    <= 1'b1;
+                                step_timeout        <= 20'd500000;
                                 state               <= S_WAIT_STEP;
                             end
                             8'h38: begin // '8' -> Step 8 clock phases (1 cycle)
                                 uart_step_clock_req <= 1'b1;
                                 uart_step_val       <= 16'd8;
                                 print_after_step    <= 1'b1;
+                                step_timeout        <= 20'd500000;
                                 state               <= S_WAIT_STEP;
                             end
                             8'h62: begin // 'b' -> Step 1 bus cycle
                                 uart_step_bus_req <= 1'b1;
                                 uart_step_val     <= 16'd1;
                                 print_after_step  <= 1'b1;
+                                step_timeout      <= 20'd500000;
                                 state             <= S_WAIT_STEP;
                             end
                             8'h61: begin // 'a' -> Arm ILA on _cpuAS
@@ -644,7 +649,7 @@ end
                 // Wait for single-step completion
                 // -------------------------------------------------------------
                 S_WAIT_STEP: begin
-                    if (!stepping_clocks && !stepping_bus) begin
+                    if (!stepping_clocks && !stepping_bus || step_timeout == 20'd0) begin
                         if (print_after_step) begin
                             sample_latch <= probes;
                             dump_col     <= 0;
@@ -652,6 +657,8 @@ end
                         end else begin
                             state <= S_IDLE;
                         end
+                    end else begin
+                        step_timeout <= step_timeout - 20'd1;
                     end
                 end
 

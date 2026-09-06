@@ -11,17 +11,62 @@ module ELVDS_OBUF (
     assign OB = ~I;
 endmodule
 
+module CLKDIV #(
+    parameter DIV_MODE = "2",
+    parameter GSREN = "false"
+) (
+    input  wire HCLKIN,
+    input  wire RESETN,
+    input  wire CALIB,
+    output reg  CLKOUT
+);
+    reg [2:0] div_cnt;
+    always @(posedge HCLKIN or negedge RESETN) begin
+        if (!RESETN) begin
+            div_cnt <= 3'd0;
+            CLKOUT  <= 1'b0;
+        end else if (DIV_MODE == "2") begin
+            CLKOUT <= ~CLKOUT;
+        end else if (DIV_MODE == "5") begin
+            if (div_cnt == 3'd4) begin
+                div_cnt <= 3'd0;
+                CLKOUT  <= 1'b0;
+            end else begin
+                div_cnt <= div_cnt + 3'd1;
+                if (div_cnt == 3'd1)
+                    CLKOUT <= 1'b1;
+            end
+        end else begin
+            CLKOUT <= ~CLKOUT;
+        end
+    end
+endmodule
+
 module Gowin_CLKDIV (
     input  wire hclkin,
     input  wire resetn,
-    output reg  clkout
+    output wire clkout
 );
-    always @(posedge hclkin or negedge resetn) begin
-        if (!resetn)
-            clkout <= 1'b0;
-        else
-            clkout <= ~clkout;
-    end
+    CLKDIV #(.DIV_MODE("5")) inst (
+        .HCLKIN(hclkin),
+        .RESETN(resetn),
+        .CALIB(1'b0),
+        .CLKOUT(clkout)
+    );
+endmodule
+
+module DCS #(
+    parameter DCS_MODE = "RISING"
+) (
+    input  wire CLK0,
+    input  wire CLK1,
+    input  wire CLK2,
+    input  wire CLK3,
+    input  wire [3:0] CLKSEL,
+    input  wire SELFORCE,
+    output wire CLKOUT
+);
+    assign CLKOUT = (CLKSEL[1]) ? CLK1 : CLK0;
 endmodule
 
 module rPLL #(

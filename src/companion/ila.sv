@@ -42,7 +42,7 @@ module ila (
     reg        halted;
     reg [15:0] step_clock_cnt;
     reg [15:0] step_bus_cnt;
-    reg [7:0]  ice_reset_timer;
+    reg [15:0] ice_reset_timer;
 
     reg        ice_cmd_strobe;
     reg [7:0]  ice_subcmd;
@@ -66,18 +66,18 @@ module ila (
 
     assign enPhi1_out = cpu_allowed ? enPhi1_in : 1'b0;
     assign enPhi2_out = cpu_allowed ? enPhi2_in : 1'b0;
-    assign cpu_reset_override = (ice_reset_timer != 8'd0);
+    assign cpu_reset_override = (ice_reset_timer != 16'd0);
 
     always @(posedge clk) begin
         if (reset) begin
             halted          <= 1'b0;
             step_clock_cnt  <= 16'd0;
             step_bus_cnt    <= 16'd0;
-            ice_reset_timer <= 8'd0;
+            ice_reset_timer <= 16'd0;
         end else begin
             // Reset timer countdown
-            if (ice_reset_timer != 8'd0)
-                ice_reset_timer <= ice_reset_timer - 8'd1;
+            if (ice_reset_timer != 16'd0)
+                ice_reset_timer <= ice_reset_timer - 16'd1;
 
             if (uart_halt_req) begin
                 halted <= 1'b1; // Halt from UART
@@ -86,7 +86,7 @@ module ila (
                 step_clock_cnt <= 16'd0;
                 step_bus_cnt   <= 16'd0;
             end else if (uart_reset_req) begin
-                ice_reset_timer <= 8'd255; // Reset from UART
+                ice_reset_timer <= 16'hFFFF; // Reset from UART
             end else if (uart_step_clock_req) begin
                 step_clock_cnt <= uart_step_val;
                 halted         <= 1'b0;
@@ -101,7 +101,7 @@ module ila (
                         step_clock_cnt <= 16'd0;
                         step_bus_cnt   <= 16'd0;
                     end
-                    8'd2: ice_reset_timer <= 8'd255; // Reset pulse
+                    8'd2: ice_reset_timer <= 16'hFFFF; // Reset pulse
                     8'd3: begin           // Step N clocks
                         step_clock_cnt <= ice_step_val;
                         halted         <= 1'b0;

@@ -158,8 +158,9 @@ sd_card #(
 );
 
 macplus macplus (
-        //Master input clock
+        //Master input clocks
         .CLKIN(clk),
+        .CLKCPU(clk),
 
         //Async reset from top-level module.
         //Can be used as initial reset.

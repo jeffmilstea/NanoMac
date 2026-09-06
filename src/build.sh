@@ -8,6 +8,8 @@ fi
 killall -9 gw_sh.bin gw_sh 2>/dev/null || true
 sleep 1
 
+cd "$(dirname "$0")"
+
 export PATH="/Applications/GowinIDE.app/Contents/Resources/Gowin_EDA/IDE/bin:$PATH"
 
 if command -v grc >/dev/null 2>&1; then
