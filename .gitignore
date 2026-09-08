@@ -6,6 +6,7 @@ src/impl/gwsynthesis/**
 src/impl/temp/**
 src/impl/pnr/**
 !src/impl/nanomac_*.json
+*.code-workspace
 *.user
 .DS_Store
 *.log
@@ -30,3 +31,5 @@ sim/*.mem
 sim/fx68k/
 sim/macplus_xml.hex
 src/plusrom_swapped.hex
+*.vvp
+screen_*.png

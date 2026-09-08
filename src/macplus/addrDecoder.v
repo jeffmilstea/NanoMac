@@ -90,7 +90,8 @@ module addrDecoder(
 	output reg selectSCC,
 	output reg selectIWM,
 	output reg selectVIA,
-	output reg selectSEOverlay
+	output reg selectSEOverlay,
+	output reg selectHardwareRegs
 );
 
 	always @(*) begin
@@ -101,6 +102,7 @@ module addrDecoder(
 		selectIWM = 0;
 		selectVIA = 0;
 		selectSEOverlay = 0;
+		selectHardwareRegs = 0;
 		
 		casez (address[23:20])
 			4'b00??: begin //00 0000 - 3F FFFF
@@ -138,6 +140,10 @@ module addrDecoder(
 			4'b1110:
 				if (address[19]) // E8 000 - EF FFF
 					selectVIA = !_cpuAS;
+			4'b1111: begin // F0 0000 - FF FFFF: test software & diagnostic space
+				if (address[19:16] == 4'h8 && address[15:3] == 13'h0) // F8 0000 - F8 0007: NanoMac HW registers
+					selectHardwareRegs = !_cpuAS;
+			end
 			default:
 				; // select nothing
 		endcase

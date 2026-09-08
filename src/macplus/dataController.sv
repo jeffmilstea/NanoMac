@@ -5,6 +5,7 @@ module dataController (
 	input		       clk8_en_n,
 	input		       E_rising,
 	input		       E_falling,
+	input		       timer_tick,
 	
 	// system control:
 	input		       machineType, // 0 - Mac Plus, 1 - Mac SE
@@ -24,6 +25,7 @@ module dataController (
 	input		       _cpuUDS,
 	input		       _cpuLDS, 
 	input		       _cpuRW,
+	input		       _cpuAS,
 	output [15:0]	       cpuDataOut,
 	
 	// peripherals:
@@ -32,6 +34,10 @@ module dataController (
 	input		       selectIWM,
 	input		       selectVIA,
 	input		       selectSEOverlay,
+	input		       selectHardwareRegs,
+	input		       cpu_turbo_active,
+	output reg	       hw_turbo_en,
+	output reg	       hw_turbo_ovr,
 	input		       _cpuVMA,
 	
 	// RAM/ROM:
@@ -205,14 +211,43 @@ module dataController (
         wire mouseX2 = mouse[3];
         wire mouseButton = mouse[4];   
 	
-	// interrupt control
+	// interrupt control: SCC (Level 2) is higher priority than VIA (Level 1)
 	assign _cpuIPL = 
-		!_viaIrq?3'b110:
 		!_sccIrq?3'b101:
+		!_viaIrq?3'b110:
 		3'b111;
 		
+	// Hardware Diagnostic & Control Registers ($F80000 - $F80007):
+	// $F80000 (RO): 16'h4E4D ('NM' for NanoMac)
+	// $F80002 (RO): 16'h0001 (Architecture / Build rev 1)
+	// $F80004 (R/W): Control & Status:
+	//                [0] hw_turbo_en (R/W)
+	//                [1] hw_turbo_ovr (R/W)
+	//                [8] cpu_turbo_active (RO)
+	//                [9] cache_active (RO, 0 for now)
+	// $F80006 (RO): 16'hC643 (Git commit short hash prefix)
+	wire [15:0] hwRegsDataOut = (cpuAddrRegLo == 2'b00) ? 16'h4E4D :
+	                            (cpuAddrRegLo == 2'b01) ? 16'h0001 :
+	                            (cpuAddrRegLo == 2'b10) ? { 6'd0, 1'b0, cpu_turbo_active, 6'd0, hw_turbo_ovr, hw_turbo_en } :
+	                            16'hC643;
+
+	always @(posedge clk or negedge _cpuReset) begin
+		if (!_cpuReset) begin
+			hw_turbo_en  <= 1'b0;
+			hw_turbo_ovr <= 1'b0;
+		end else if (clk8_en_p) begin
+			if (selectHardwareRegs && !_cpuAS && !_cpuRW && (cpuAddrRegLo == 2'b10) && (cpuDataIn[15:8] == 8'h55)) begin
+				if (!_cpuLDS) begin
+					hw_turbo_en  <= cpuDataIn[0];
+					hw_turbo_ovr <= cpuDataIn[1];
+				end
+			end
+		end
+	end
+
 	// CPU-side data output mux
-	assign cpuDataOut = selectIWM ? iwmDataOut :
+	assign cpuDataOut = selectHardwareRegs ? hwRegsDataOut :
+			    selectIWM ? iwmDataOut :
 			    selectVIA ? viaDataOut :
 			    selectSCC ? { sccDataOut, 8'hEF } :
 			    selectSCSI ? { scsiDataOut, 8'hEF } :
@@ -320,6 +355,7 @@ module dataController (
 		.clock      (clk),
 		.rising     (E_rising),
 		.falling    (E_falling),
+		.timer_tick (timer_tick),
 		.reset      (!_cpuReset),
 
 		.addr       (cpuAddrRegHi),

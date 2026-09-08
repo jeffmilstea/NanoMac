@@ -62,3 +62,41 @@ Speedometer 4.02 CPU tests:
 Iterations = 1
   CPU = 0.021, Math = 0.062 = 19.6Mhz
   CPU = 0.054, Math = 0.146 =  7.8Mhz
+
+Speedometer 4.02 Benchmark Mix (without Dhrystone, which crashes):
+Iterations = 1
+  Average = 0.018 = 19.6Mhz
+  Average = 0.042 =  7.8Mhz
+
+Before starting the caching work, after latest VIA 6522 fixes:
+Speedometer 4.02 Benchmark Mix - Dhrystone test:
+Iterations = 1
+  Average = TBD = 19.6Mhz
+  Average = TBD =  7.8Mhz
+
+Speedometer 3.23 Benchmark Mix - Dhrystone test:
+  Abs = 798.722, Rat = 0.819 =  7.8Mhz
+
+After latest fixes:
+The Speedometer 4.02 custom cursor now spins at full speed with no mouse lag!
+Speedometer 4.02 Benchmark Mix - Dhrystone test:
+  Abs = 570.732, Rat = 0.033 =  7.8Mhz
+  Abs = 569.965, Rat = 0.032 =  19.6Mhz
+
+Speedometer 4.02 Benchmark Mix - Sieve test:
+Iterations = 3
+  Abs = 30.172, Rat = 0.045 = 19.6Mhz
+  Abs = 30.190, Rat = 0.045 =  7.8Mhz
+
+After Timer B t2_timeout fix (PrimeTime-only arm, removed 64us timeout race):
+Speedometer 4.02 Benchmark Mix - Dhrystone test:
+Iterations = 3
+  Abs = 546.926, Rat = 0.031 =  7.8Mhz
+  Abs = 552.185, Rat = 0.031 =  19.6Mhz
+
+Speedometer 4.02 Benchmark Mix - Sieve test:
+Iterations = 3
+  Abs = 596.550, Rat = 0.002 = 7.8Mhz
+  Abs = 596.717, Rat = 0.002 = 19.6Mhz
+Note: No lockup. All 3 iterations complete. Turbo mode speed difference not yet visible
+      (19.6 MHz / 7.8 MHz scores nearly identical - turbo investigation pending).

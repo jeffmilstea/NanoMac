@@ -15,9 +15,7 @@ if [ "$MODE" = "-f" ]; then
     EXIT_CODE=$?
     echo "$OUTPUT"
     if [ $EXIT_CODE -eq 0 ] && echo "$OUTPUT" | grep -q "100.00%"; then
-        echo "SUCCESS: SPI Flash write confirmed 100% complete!"
-        echo "Loading bitstream into Tang Nano 20K SRAM for immediate boot..."
-        openFPGALoader -b tangnano20k "$BITSTREAM" --freq 6000000
+        echo "SUCCESS: SPI Flash write confirmed 100% complete! Please power cycle the board."
         exit 0
     else
         echo "ERROR: SPI Flash programming failed!"

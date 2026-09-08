@@ -179,8 +179,9 @@ wire _memoryUDS, _memoryLDS;
 
 // peripherals
 wire vid_alt, loadPixels, _hblank, _vblank;
-wire memoryOverlayOn, selectSCSI, selectSCC, selectIWM, selectVIA, selectRAM, selectROM, selectSEOverlay;
+wire memoryOverlayOn, selectSCSI, selectSCC, selectIWM, selectVIA, selectRAM, selectROM, selectSEOverlay, selectHardwareRegs;
 wire [15:0] dataControllerDataOut;
+wire hw_turbo_en, hw_turbo_ovr;
 
 // audio
 wire snd_alt;
@@ -227,7 +228,9 @@ assign      _cpuVPA = (cpuFC == 3'b111) ? 1'b0 : ~(!_cpuAS && selectVIA);
 // Turbo Mode Clock & DTACK Logic:
 // configTurbo = 0: Off (Stock 7.8336 MHz)
 // configTurbo != 0: Turbo (19.584 MHz nominal, 2.50x speedup)
-wire cpu_turbo_active = (configTurbo != 2'b00);
+// If hw_turbo_ovr is asserted by software, software controls turbo; otherwise follow configTurbo.
+wire effective_turbo = hw_turbo_ovr ? hw_turbo_en : (configTurbo != 2'b00);
+wire cpu_turbo_active = effective_turbo;
 
 // -------------------------------------------------------------------------
 // CPU Clock Enable & Turbo Mode Generator
@@ -298,6 +301,30 @@ wire turbo_e_falling = (e_pos_sync[2] ^ e_pos_sync[1]);
 
 wire via_e_rising  = cpu_turbo_active ? turbo_e_rising  : fx68k_e_neg;
 wire via_e_falling = cpu_turbo_active ? turbo_e_falling : fx68k_e_pos;
+
+// -------------------------------------------------------------------------
+// Fixed 783.36 kHz VIA Timer Tick Generator
+// -------------------------------------------------------------------------
+// In both Stock (7.83 MHz) and Turbo (19.58 MHz) modes, the 6522 VIA timers
+// (Timer 1 and Timer 2) must decrement at the standard 783.36 kHz rate.
+// clk_sys is 15.6672 MHz. 15.6672 MHz / 20 = 783.36 kHz.
+reg [4:0] via_timer_div = 5'd0;
+reg via_timer_tick = 1'b0;
+
+always @(posedge clk_sys or negedge _cpuReset) begin
+    if (!_cpuReset) begin
+        via_timer_div  <= 5'd0;
+        via_timer_tick <= 1'b0;
+    end else begin
+        if (via_timer_div == 5'd19) begin
+            via_timer_div  <= 5'd0;
+            via_timer_tick <= 1'b1;
+        end else begin
+            via_timer_div  <= via_timer_div + 5'd1;
+            via_timer_tick <= 1'b0;
+        end
+    end
+end
 
 assign mac_probes = {
     cpuAddr[23:1], 1'b0, // [47:24] 24-bit CPU address
@@ -407,6 +434,7 @@ addrController ac0
 	.selectRAM(selectRAM),
 	.selectROM(selectROM),
 	.selectSEOverlay(selectSEOverlay),
+	.selectHardwareRegs(selectHardwareRegs),
 	.hsync(hsync), 
 	.vsync(vsync),
 	._hblank(_hblank),
@@ -440,6 +468,7 @@ dataController #(SCSI_DEVS) dc0
 	.clk8_en_n(clk8_en_n),
 	.E_rising(via_e_rising),
 	.E_falling(via_e_falling),
+	.timer_tick(via_timer_tick),
 	.machineType(configMachineType),
 	.floppy_wprot(configFloppyWProt),
 	.scsi_wprot(configSCSIWProt),
@@ -449,6 +478,7 @@ dataController #(SCSI_DEVS) dc0
 	._cpuUDS(_cpuUDS), 
 	._cpuLDS(_cpuLDS), 
 	._cpuRW(_cpuRW), 
+	._cpuAS(_cpuAS),
 	._cpuVMA(_cpuVMA),
 	.cpuDataIn(cpuDataOut),
 	.cpuDataOut(dataControllerDataOut), 	
@@ -460,6 +490,10 @@ dataController #(SCSI_DEVS) dc0
 	.selectIWM(selectIWM),
 	.selectVIA(selectVIA),
 	.selectSEOverlay(selectSEOverlay),
+	.selectHardwareRegs(selectHardwareRegs),
+	.cpu_turbo_active(cpu_turbo_active),
+	.hw_turbo_en(hw_turbo_en),
+	.hw_turbo_ovr(hw_turbo_ovr),
 	.cpuBusControl(cpuBusControl),
 	.videoBusControl(videoBusControl),
 	.cycleReady(busPhase == 3'd7),

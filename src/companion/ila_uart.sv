@@ -355,6 +355,7 @@ module ila_uart #(
                                 state          <= S_PRINT_MSG;
                             end
                             8'h41: begin // 'A' -> Force trigger now
+                                uart_force_trig_req <= 1'b1;
                                 msg_sel             <= 5;
                                 msg_idx             <= 0;
                                 msg_len             <= 21;

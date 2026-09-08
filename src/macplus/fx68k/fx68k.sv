@@ -217,9 +217,10 @@ module fx68k(
 	wire BeDebounced = ~( BeI | BeiDelay);
 
 	always_ff @( posedge Clks.clk) begin
-		if( Clks.pwrUp) begin
+		if( Clks.pwrUp || Clks.extReset) begin
 			rBerr <= 1'b0;
 			BeI <= 1'b0;
+			Vpai <= 1'b1;
 		end
 		else if( Clks.enPhi2) begin
 			rDtack <= DTACKn;
@@ -487,31 +488,37 @@ module fx68k(
 	reg en_E;
 
 	always_ff @( posedge Clks.clk) begin
-		if( Clks.pwrUp) begin
+		if( Clks.extReset || Clks.pwrUp) begin
 			E <= 1'b0;
-			eCntr <='0;
+			eCntr <= 4'd0;
 			rVma <= 1'b1;
-			en_E <= 1;
+			en_E <= 1'b1;
 		end
-		if( Clks.enPhi1)
-			if (E_div) en_E <= !en_E; else en_E <= 1'b1;
+		else begin
+			if( Clks.enPhi1) begin
+				if (E_div) 
+					en_E <= !en_E; 
+				else 
+					en_E <= 1'b1;
 
-		if( Clks.enPhi2 & en_E) begin
-			if( eCntr == 9)
-				E <= 1'b0;
-			else if( eCntr == 5)
-				E <= 1'b1;
+				if (eCntr == 4'd0 && en_E)
+					rVma <= 1'b1;
+			end
 
-			if( eCntr == 9)
-				eCntr <= '0;
-			else
-				eCntr <= eCntr + 1'b1;
+			if( Clks.enPhi2 && en_E) begin
+				if( eCntr == 4'd9) begin
+					E <= 1'b0;
+					eCntr <= 4'd0;
+				end else begin
+					if( eCntr == 4'd5)
+						E <= 1'b1;
+					eCntr <= eCntr + 4'd1;
+				end
+
+				if( addrOe && ~Vpai && (eCntr == 4'd3))
+					rVma <= 1'b0;
+			end
 		end
-		
-		if( Clks.enPhi2 & addrOe & ~Vpai & (eCntr == 3) & en_E)
-			rVma <= 1'b0;
-		else if( Clks.enPhi1 & eCntr == '0 & en_E)
-			rVma <= 1'b1;
 	end
 		
 	always_ff @( posedge Clks.clk) begin

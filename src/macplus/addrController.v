@@ -36,6 +36,7 @@ module addrController (
 	output	      selectRAM,
 	output	      selectROM,
 	output	      selectSEOverlay,
+	output	      selectHardwareRegs,
 	
 	// video:
 	output	      hsync,
@@ -130,7 +131,8 @@ module addrController (
 		.selectSCC(selectSCC),
 		.selectIWM(selectIWM),
 		.selectVIA(selectVIA),
-		.selectSEOverlay(selectSEOverlay));
+		.selectSEOverlay(selectSEOverlay),
+		.selectHardwareRegs(selectHardwareRegs));
 
 	// video
 	videoTimer vt(
