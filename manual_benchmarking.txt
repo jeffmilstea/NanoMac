@@ -98,5 +98,7 @@ Speedometer 4.02 Benchmark Mix - Sieve test:
 Iterations = 3
   Abs = 596.550, Rat = 0.002 = 7.8Mhz
   Abs = 596.717, Rat = 0.002 = 19.6Mhz
-Note: No lockup. All 3 iterations complete. Turbo mode speed difference not yet visible
-      (19.6 MHz / 7.8 MHz scores nearly identical - turbo investigation pending).
+Note: No lockup. All 3 iterations complete. 7.8 MHz and 19.6 MHz scores are
+      nearly identical as expected -- without a BRAM cache the machine is
+      memory-bound, so higher CPU clock does not improve throughput. The cache
+      feature (feature/bram-cache) is required to realize turbo mode gains.
