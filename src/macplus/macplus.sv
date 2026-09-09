@@ -54,6 +54,7 @@ module macplus
 	input [1:0]	       configFloppyWProt,
 	input		       configSCSIWProt,
 	input [1:0]	       configTurbo,
+	input		       configCache,      // OSD cache enable
 			  
         // interface to sd card
 	input [31:0]	       sdc_image_size,
@@ -181,7 +182,7 @@ wire _memoryUDS, _memoryLDS;
 wire vid_alt, loadPixels, _hblank, _vblank;
 wire memoryOverlayOn, selectSCSI, selectSCC, selectIWM, selectVIA, selectRAM, selectROM, selectSEOverlay, selectHardwareRegs;
 wire [15:0] dataControllerDataOut;
-wire hw_turbo_en, hw_turbo_ovr;
+wire hw_turbo_en, hw_turbo_ovr, hw_cache_en;
 
 // audio
 wire snd_alt;
@@ -352,22 +353,57 @@ assign mac_probes = {
     busPhase[2:0]        // [2:0]
 };
 
+// -------------------------------------------------------------------------
+// BRAM Cache — 2KB direct-mapped, write-through (historical 68030 approach)
+// -------------------------------------------------------------------------
+// cacheable: ROM and RAM only; disabled during memory overlay boot window
+// cacheable: OSD or CSR enable, ROM/RAM only, overlay off
+wire        cache_cacheable = (configCache || hw_cache_en) && (selectROM || selectRAM) && !memoryOverlayOn;
+
+// CPU RAM write pulse: 1-cycle at Phase 2 of any RAM write → invalidate line
+wire        cache_wr_pulse  = !_cpuRW && selectRAM && !_cpuAS && (busPhase == 3'd2);
+
+wire cache_hit;
+wire [15:0] cache_data;
+
+bram_cache cache0 (
+    .clk_sys      ( clk_sys           ),
+    .cpu_addr     ( cpuAddr           ),
+    .cacheable    ( cache_cacheable   ),
+    .rom_req      ( rom_req           ),
+    .ram_req      ( ram_req           ),
+    .cpu_wr_pulse ( cache_wr_pulse    ),
+    .cpu_wr_addr  ( cpuAddr           ),
+    .fill_pulse   ( cache_fill_pulse  ),
+    .fill_addr    ( cpuAddr           ),
+    .fill_data    ( cache_fill_data   ),
+    .cache_hit    ( cache_hit         ),
+    .cache_data   ( cache_data        )
+);
+
 // DTACK completion conditions:
-// In Stock Mode (7.83 MHz): CPU states are 63.8ns long. Sampling in S5 (Phase 5) means S6 (data latch)
-// occurs at Phase 6. Asserting DTACK at Phase 4 is standard for Stock.
-// In Turbo Mode (19.58 MHz): CPU states are 25.5ns long. RAM reads must wait until busPhase >= 6
-// when SDRAM dout is guaranteed valid. RAM writes can complete at busPhase >= 4.
-// ROM reads can complete at busPhase >= 4 (SPI flash controller ready).
+// Cache hit (Phase 3): asserts one cycle earlier than normal in both modes.
+// Stock Mode (7.83 MHz): DTACK at Phase 4 on miss (unchanged).
+// Turbo Mode (19.58 MHz): DTACK at Phase 7 on miss (unchanged).
 // All other non-VIA accesses (and non-IACK) wait for io_done.
-wire ram_done = cpu_turbo_active ? (busPhase >= 3'd7) : (busPhase >= 3'd4);
-
-wire rom_done = cpu_turbo_active ? (busPhase >= 3'd7) : (busPhase >= 3'd4);
-
+wire ram_done = cache_hit || (cpu_turbo_active ? (busPhase >= 3'd7) : (busPhase >= 3'd4));
+wire rom_done = cache_hit || (cpu_turbo_active ? (busPhase >= 3'd7) : (busPhase >= 3'd4));
 wire io_done  = cpu_turbo_active ? io_synced : 1'b1;
 
-assign _cpuDTACK = ~((!_cpuAS && ram_req && ram_done) ||
-                     (!_cpuAS && rom_req && rom_done) ||
-                     (!_cpuAS && (cpuFC != 3'b111) && !selectVIA && !selectRAM && !selectROM && io_done));
+// _cpuDTACK_int is the computed signal; also used by fill_pulse to detect
+// the exact cycle when miss data becomes valid (DTACK falling edge).
+wire _cpuDTACK_int = ~((!_cpuAS && ram_req && ram_done) ||
+                       (!_cpuAS && rom_req && rom_done) ||
+                       (!_cpuAS && (cpuFC != 3'b111) && !selectVIA && !selectRAM && !selectROM && io_done));
+assign _cpuDTACK = _cpuDTACK_int;
+
+// Fill pulse: fires once per bus cycle when DTACK asserts on a read miss
+reg  _cpuDTACK_prev;
+always @(posedge clk_sys) _cpuDTACK_prev <= _cpuDTACK_int;
+wire cache_fill_pulse = !_cpuDTACK_int && _cpuDTACK_prev && !cache_hit &&
+                        (rom_req || ram_req);
+// Fill data: whichever path resolved the miss
+wire [15:0] cache_fill_data = rom_req ? romDataMod : sdram_do;
 
 fx68k fx68k (
 	.clk        ( clk_cpu ),
@@ -494,13 +530,14 @@ dataController #(SCSI_DEVS) dc0
 	.cpu_turbo_active(cpu_turbo_active),
 	.hw_turbo_en(hw_turbo_en),
 	.hw_turbo_ovr(hw_turbo_ovr),
+	.hw_cache_en(hw_cache_en),
 	.cpuBusControl(cpuBusControl),
 	.videoBusControl(videoBusControl),
 	.cycleReady(busPhase == 3'd7),
 	.memoryDataOut(sdram_din),
         .romSel(!_romOE), 
-	.ramDataIn(sdram_do),
-	.romDataIn(romDataMod),
+	.ramDataIn( (cache_hit && ram_req) ? cache_data : sdram_do   ),
+	.romDataIn( (cache_hit && rom_req) ? cache_data : romDataMod ),
 
         // interface to sd card
 	.sdc_img_mounted( sdc_image_mounted ),

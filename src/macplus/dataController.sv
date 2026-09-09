@@ -38,6 +38,7 @@ module dataController (
 	input		       cpu_turbo_active,
 	output reg	       hw_turbo_en,
 	output reg	       hw_turbo_ovr,
+	output reg	       hw_cache_en,
 	input		       _cpuVMA,
 	
 	// RAM/ROM:
@@ -220,26 +221,31 @@ module dataController (
 	// Hardware Diagnostic & Control Registers ($F80000 - $F80007):
 	// $F80000 (RO): 16'h4E4D ('NM' for NanoMac)
 	// $F80002 (RO): 16'h0001 (Architecture / Build rev 1)
-	// $F80004 (R/W): Control & Status:
-	//                [0] hw_turbo_en (R/W)
+	// $F80004 (R/W): Control & Status (write requires magic byte 0x55 in [15:8]):
+	//                [0] hw_turbo_en  (R/W)
 	//                [1] hw_turbo_ovr (R/W)
+	//                [2] hw_cache_en  (R/W) — enables BRAM cache
 	//                [8] cpu_turbo_active (RO)
-	//                [9] cache_active (RO, 0 for now)
-	// $F80006 (RO): 16'hC643 (Git commit short hash prefix)
+	// $F80006 (RO): Git commit short hash — injected at synthesis time via GIT_HASH define
+	`ifndef GIT_HASH
+	`define GIT_HASH 16'hDEAD
+	`endif
 	wire [15:0] hwRegsDataOut = (cpuAddrRegLo == 2'b00) ? 16'h4E4D :
 	                            (cpuAddrRegLo == 2'b01) ? 16'h0001 :
-	                            (cpuAddrRegLo == 2'b10) ? { 6'd0, 1'b0, cpu_turbo_active, 6'd0, hw_turbo_ovr, hw_turbo_en } :
-	                            16'hC643;
+	                            (cpuAddrRegLo == 2'b10) ? { 5'd0, hw_cache_en, 1'b0, cpu_turbo_active, 6'd0, hw_turbo_ovr, hw_turbo_en } :
+	                            `GIT_HASH;
 
 	always @(posedge clk or negedge _cpuReset) begin
 		if (!_cpuReset) begin
 			hw_turbo_en  <= 1'b0;
 			hw_turbo_ovr <= 1'b0;
+			hw_cache_en  <= 1'b0;
 		end else if (clk8_en_p) begin
 			if (selectHardwareRegs && !_cpuAS && !_cpuRW && (cpuAddrRegLo == 2'b10) && (cpuDataIn[15:8] == 8'h55)) begin
 				if (!_cpuLDS) begin
 					hw_turbo_en  <= cpuDataIn[0];
 					hw_turbo_ovr <= cpuDataIn[1];
+					hw_cache_en  <= cpuDataIn[2];
 				end
 			end
 		end

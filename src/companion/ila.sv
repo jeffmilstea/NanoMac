@@ -133,8 +133,8 @@ module ila (
     // -------------------------------------------------------------------------
     // 2. ILA 512 x 64 Trace Buffer (Block RAM)
     // -------------------------------------------------------------------------
-    localparam BUFFER_DEPTH = 512;
-    localparam ADDR_WIDTH   = 9;
+    localparam BUFFER_DEPTH = 256;
+    localparam ADDR_WIDTH   = 8;
 
     reg [63:0] trace_ram [0:BUFFER_DEPTH-1];
     reg [ADDR_WIDTH-1:0] wr_ptr;
@@ -243,8 +243,8 @@ module ila (
                         trace_ram[wr_ptr] <= probes;
                         wr_ptr <= wr_ptr + 1'b1;
                         post_count <= post_count + 1'b1;
-                        // Fill remaining samples (448 post-trigger)
-                        if (post_count >= (BUFFER_DEPTH - 9'd65))
+                        // Fill remaining samples (192 post-trigger)
+                        if (post_count >= (BUFFER_DEPTH - 8'd65))
                             ila_state <= ILA_DONE;
                     end
                 end
@@ -311,11 +311,11 @@ module ila (
                         8'd0: begin
                             case (byte_cnt)
                                 5'd0: dout <= { 3'b001, (ila_state == ILA_DONE), (ila_state >= ILA_POST_FILL), (ila_state == ILA_ARMED || ila_state == ILA_ARM_PRE), halted, 1'b1 };
-                                5'd1: dout <= 8'd2; // 512 depth MSB (512 >> 8)
-                                5'd2: dout <= 8'd0; // 512 depth LSB
-                                5'd3: dout <= { 7'd0, trigger_pos[8] };
+                                5'd1: dout <= 8'd1; // 256 depth MSB (256 >> 8)
+                                5'd2: dout <= 8'd0; // 256 depth LSB
+                                5'd3: dout <= 8'd0; // trigger_pos MSB (8-bit addr, no upper byte)
                                 5'd4: dout <= trigger_pos[7:0];
-                                5'd5: dout <= { 7'd0, wr_ptr[8] };
+                                5'd5: dout <= 8'd0; // wr_ptr MSB
                                 5'd6: dout <= wr_ptr[7:0];
                                 default: dout <= 8'h00;
                             endcase

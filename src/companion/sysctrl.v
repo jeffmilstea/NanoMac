@@ -35,7 +35,8 @@ module sysctrl (
   output reg [1:0]  system_volume,
   output reg [1:0]  system_floppy_wprot,
   output reg [1:0]  system_turbo,
-  output reg	    system_hdd_wprot
+  output reg	    system_hdd_wprot,
+  output reg	    system_cache
 );
 
 reg [3:0] state;
@@ -335,6 +336,8 @@ always @(posedge clk) begin
 		   if(id == "S") system_hdd_wprot <= data_in[0];
 		   // Value "F": fastboot off(0) or on(1), disables rom and ram checks
 		   if(id == "F") system_fastboot <= data_in[0];
+		   // Value "C": cache off(0) or on(1), enables 2KB BRAM instruction/data cache
+		   if(id == "C") system_cache <= data_in[0];
 		   // Value "M": serial modem port redirect to WiFi(0) or external/MIDI(1)
 		   if(id == "M") system_serial_ext <= data_in[0];
                 end

@@ -111,6 +111,7 @@ wire [1:0] osd_volume;          // 0=off, 1=low, 2=mid, 3=hi
 wire [1:0] osd_floppy_wprot;    // 0=int, 1=ext
 wire [1:0] osd_turbo;           // 0=Off (7.8MHz), 1=On (19.6MHz)
 wire       osd_hdd_wprot;       // 0=rw, 1=ro
+wire       osd_cache;           // 0=cache off, 1=cache on
 
 // busphase 0..7 of mac. Used to synchronize sdram to video and cpu
 wire [2:0] phase;
@@ -347,6 +348,7 @@ sysctrl sysctrl (
 		.system_floppy_wprot(osd_floppy_wprot),
         .system_turbo(osd_turbo),
 		.system_hdd_wprot(osd_hdd_wprot),
+		.system_cache(osd_cache),
                                  
         .int_out_n(spi_irqn),
         .int_in( { 4'b0000, sdc_int, 1'b0, hid_int, 1'b0 }),
@@ -603,6 +605,7 @@ macplus macplus (
     .configTurbo(turbo_synced),
     .configFloppyWProt(osd_floppy_wprot), // floppy disk write protections
     .configSCSIWProt(osd_hdd_wprot), // hdd/scsi disk write protection
+    .configCache(osd_cache),    // BRAM cache enable
  
     // interface to sd card
     .sdc_image_size ( sdc_image_size ),
