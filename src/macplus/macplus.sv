@@ -93,6 +93,8 @@ module macplus
 	// ILA / ICE debug probe and execution control interface
 	output [47:0]	       mac_probes,
 	output		       _cpuAS_probe,
+	output		       cache_hit_probe,   // ILA: 1 when cache hit in progress
+	output		       cache_en_probe,    // ILA: 1 when cache is enabled
 	output		       enPhi1_raw,
 	output		       enPhi2_raw,
 	input		       enPhi1_gated,
@@ -263,7 +265,9 @@ wire gen_enPhi2 = cpu_turbo_active ? turbo_enPhi2 : clk8_en_n;
 
 assign enPhi1_raw = gen_enPhi1;
 assign enPhi2_raw = gen_enPhi2;
-assign _cpuAS_probe = _cpuAS;
+assign      _cpuAS_probe = _cpuAS;
+assign      cache_hit_probe = cache_hit;
+assign      cache_en_probe  = cache_cacheable;
 
 // -------------------------------------------------------------------------
 // VIA 6522 E-Clock Strobe Synchronizer

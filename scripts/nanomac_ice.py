@@ -114,6 +114,8 @@ def parse_sample(raw_64):
     data = (raw_64 >> 56) & 0xFF
     addr = (raw_64 >> 32) & 0x00FFFFFF
     phase = (raw_64 >> 26) & 0x7
+    cache_hit = bool(raw_64 & (1 << 25))
+    cache_en  = bool(raw_64 & (1 << 24))
     ctrl = raw_64 & 0x00FFFFFF
 
     ram_cs = bool(ctrl & (1 << 22))
@@ -137,6 +139,8 @@ def parse_sample(raw_64):
         "rw": rw,
         "_as": _as,
         "turbo": turbo,
+        "cache_hit": cache_hit,
+        "cache_en": cache_en,
     }
 
 
@@ -215,10 +219,10 @@ def cmd_dump_binary(ser, vcd_filename=None):
     ser.reset_input_buffer()
     ser.write(b"B")
 
-    # Read 4096 bytes (512 samples * 8 bytes)
-    raw = ser.read(4096)
-    if len(raw) < 4096:
-        print(f"Warning: Expected 4096 bytes, received {len(raw)} bytes.")
+    # Read 2048 bytes (256 samples * 8 bytes) — ILA trimmed to 256 samples
+    raw = ser.read(2048)
+    if len(raw) < 2048:
+        print(f"Warning: Expected 2048 bytes, received {len(raw)} bytes.")
 
     samples = []
     for i in range(0, len(raw), 8):
@@ -233,11 +237,11 @@ def cmd_dump_binary(ser, vcd_filename=None):
         write_vcd(samples, vcd_filename)
         print(f"Exported GTKWave trace to: {vcd_filename}")
     else:
-        print(f"{'SMPL':<4} {'ADDR':<8} {'DATA':<4} {'RW':<3} {'AS':<3} {'DTACK':<5} {'RAM':<4} {'ROM':<4} {'PH':<3} {'TURBO':<5}")
-        print("-" * 55)
+        print(f"{'SMPL':<4} {'ADDR':<8} {'DATA':<4} {'RW':<3} {'AS':<3} {'DTACK':<5} {'RAM':<4} {'ROM':<4} {'PH':<3} {'TURBO':<5} {'C$HIT':<5} {'C$EN':<5}")
+        print("-" * 70)
         for i, s in enumerate(samples[:64]):
             print(
-                f"{i:03d}  {s['addr']:06X}   {s['data']:02X}   {s['rw']:<3} {int(s['_as']):<3} {int(s['dtack']):<5} {int(s['ram_cs']):<4} {int(s['rom_cs']):<4} {s['phase']:<3} {int(s['turbo']):<5}"
+                f"{i:03d}  {s['addr']:06X}   {s['data']:02X}   {s['rw']:<3} {int(s['_as']):<3} {int(s['dtack']):<5} {int(s['ram_cs']):<4} {int(s['rom_cs']):<4} {s['phase']:<3} {int(s['turbo']):<5} {int(s['cache_hit']):<5} {int(s['cache_en']):<5}"
             )
         if len(samples) > 64:
             print(f"... and {len(samples) - 64} more samples. Pass --vcd <file.vcd> to view in GTKWave.")

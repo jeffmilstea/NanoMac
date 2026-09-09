@@ -73,6 +73,10 @@
 	<listentry label="Off (7.8MHz)" value="0"/>
 	<listentry label="On (19.6MHz)"  value="1"/>
       </list>
+      <list label="Cache:" id="C" default="0">
+	<listentry label="Off" value="0"/>
+	<listentry label="On (2KB BRAM)" value="1"/>
+      </list>
       <button label="Save settings" action="save"/>
     </menu>    
     <button label="Reset" action="reset_hide"/>

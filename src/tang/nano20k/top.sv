@@ -250,6 +250,8 @@ mcu_spi mcu (
 // On-Chip ILA & ICE Debugger Core
 // -----------------------------------------------------------------------------
 wire [47:0] mac_probes;
+wire        cache_hit_probe;
+wire        cache_en_probe;
 wire        enPhi1_raw, enPhi2_raw;
 wire        enPhi1_gated, enPhi2_gated;
 
@@ -260,7 +262,8 @@ wire [63:0] ila_probes = {
     sdram_oe,             // [30]
     sdram_we,             // [29]
     phase,                // [28:26] SDRAM phase
-    2'b00,                // [25:24] spares
+    cache_hit_probe,      // [25]   cache hit this cycle
+    cache_en_probe,       // [24]   cache enabled (cacheable gate)
     mac_probes[23:0]      // [23:0]  CPU control, phases, enables
 };
 
@@ -650,6 +653,8 @@ macplus macplus (
     // ILA / ICE debug probe and execution control
     .mac_probes( mac_probes ),
     ._cpuAS_probe( _cpuAS_probe ),
+    .cache_hit_probe( cache_hit_probe ),
+    .cache_en_probe( cache_en_probe ),
     .enPhi1_raw( enPhi1_raw ),
     .enPhi2_raw( enPhi2_raw ),
     .enPhi1_gated( enPhi1_gated ),
