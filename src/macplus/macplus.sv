@@ -95,6 +95,9 @@ module macplus
 	output		       _cpuAS_probe,
 	output		       cache_hit_probe,   // ILA: 1 when cache hit in progress
 	output		       cache_en_probe,    // ILA: 1 when cache is enabled
+	output [15:0]	       cache_hits,      // stat: cache hits since last clear
+	output [15:0]	       cache_misses,    // stat: cache misses since last clear
+	output [15:0]	       cache_fills,     // stat: miss fills since last clear
 	output		       enPhi1_raw,
 	output		       enPhi2_raw,
 	input		       enPhi1_gated,
@@ -367,7 +370,7 @@ wire        cache_cacheable = (configCache || hw_cache_en) && (selectROM || sele
 // CPU RAM write pulse: 1-cycle at Phase 2 of any RAM write → invalidate line
 wire        cache_wr_pulse  = !_cpuRW && selectRAM && !_cpuAS && (busPhase == 3'd2);
 
-wire cache_hit;
+wire        cache_hit;
 wire [15:0] cache_data;
 
 bram_cache cache0 (
@@ -401,13 +404,96 @@ wire _cpuDTACK_int = ~((!_cpuAS && ram_req && ram_done) ||
                        (!_cpuAS && (cpuFC != 3'b111) && !selectVIA && !selectRAM && !selectROM && io_done));
 assign _cpuDTACK = _cpuDTACK_int;
 
-// Fill pulse: fires once per bus cycle when DTACK asserts on a read miss
-reg  _cpuDTACK_prev;
-always @(posedge clk_sys) _cpuDTACK_prev <= _cpuDTACK_int;
-wire cache_fill_pulse = !_cpuDTACK_int && _cpuDTACK_prev && !cache_hit &&
-                        (rom_req || ram_req);
-// Fill data: whichever path resolved the miss
-wire [15:0] cache_fill_data = rom_req ? romDataMod : sdram_do;
+// ---------------------------------------------------------------------------
+// Cache miss fill + hit/miss/fill statistics
+// ---------------------------------------------------------------------------
+// Why the original implementation never filled in turbo: the 68000 deasserts
+// /AS a few CPU cycles after it samples DTACK. In turbo mode (19.58 MHz,
+// ~10 CPU cycles per bus phase) that happens well inside the DTACK-assert
+// phase, so req_rst asynchronously clears ram_req/rom_req before the next
+// clk_sys posedge -- the old DTACK-edge fill detector saw already-cleared
+// requests and never generated a fill pulse (100% miss rate, cache no-op).
+//
+// The 68000 holds A[23:0] stable while /AS is low, and DTACK cannot assert
+// before phase 3 (cache hit) / phase 4 (stock miss) / phase 7 (turbo miss).
+// Therefore:
+//   * posedge 3->4: miss is known (cache_hit valid since phase 3) and /AS is
+//     still low in BOTH modes for a miss -> latch fill address + ROM/RAM type.
+//   * posedge 6->7: SDRAM/ROM data is guaranteed valid (a miss DTACKs no
+//     earlier than phase 7) -> issue the 1-cycle fill pulse with the data.
+wire miss_evt_p3 = (busPhase == 3'd3) && !_cpuAS && !_cpuRW &&
+                   (ram_req || rom_req) && !cache_hit && cache_cacheable;
+
+reg [23:1] fill_addr;
+reg        fill_is_rom;
+reg        miss_latched;
+always @(posedge clk_sys) begin
+    if (busPhase == 3'd3) begin
+        miss_latched <= miss_evt_p3;
+        fill_addr    <= cpuAddr;
+        fill_is_rom  <= rom_req;
+    end else if (busPhase == 3'd7) begin
+        miss_latched <= 1'b0; // safety: never carry a fill past cycle end
+    end
+end
+
+reg        cache_fill_pulse;
+reg [15:0] cache_fill_data;
+always @(posedge clk_sys) begin
+    if (miss_latched && busPhase == 3'd6) begin
+        cache_fill_pulse <= 1'b1;
+        cache_fill_data  <= fill_is_rom ? romDataMod : sdram_do;
+    end else begin
+        cache_fill_pulse <= 1'b0;
+    end
+end
+
+// Per-cycle hit/miss classification, fully in the clk_sys domain so it is
+// immune to the asynchronous /AS deassert. The cycle type is latched at
+// posedge 2->3 (when /AS is still low and the requests are set), the hit is
+// evaluated at posedge 3->4 (cache_hit valid from phase 3), and the counters
+// are advanced at cycle end (posedge 7->0).
+reg [3:0] cyc_type_r; // {active, is_read, is_rom, is_ram}
+always @(posedge clk_sys) begin
+    if (busPhase == 3'd2)
+        cyc_type_r <= { !_cpuAS, !_cpuRW, rom_req, ram_req };
+end
+
+wire cyc_mem_rd = cyc_type_r[3] && cyc_type_r[2] && (cyc_type_r[0] | cyc_type_r[1]);
+reg  cyc_hit_flag;
+reg  cyc_miss_flag;
+always @(posedge clk_sys) begin
+    if (busPhase == 3'd3) begin
+        cyc_hit_flag  <= cyc_mem_rd && cache_hit;
+        cyc_miss_flag <= cyc_mem_rd && !cache_hit;
+    end
+end
+
+// Saturating counters. Cleared by writing 0x55xx to $F80008.
+reg [15:0] cache_hits   = 16'd0;
+reg [15:0] cache_misses = 16'd0;
+reg [15:0] cache_fills  = 16'd0;
+wire cache_clr = selectHardwareRegs && !_cpuAS && !_cpuRW && !_cpuLDS &&
+                 (cpuAddr[3]) && (cpuAddr[2:1] == 2'b00) &&
+                 (cpuDataOut[15:8] == 8'h55);
+always @(posedge clk_sys or negedge _cpuReset) begin
+    if (!_cpuReset || cache_clr) begin
+        cache_hits   <= 16'd0;
+        cache_misses <= 16'd0;
+    end else if (busPhase == 3'd7) begin
+        if (cyc_hit_flag  && (cache_hits   != 16'hFFFF))
+            cache_hits   <= cache_hits   + 1'b1;
+        if (cyc_miss_flag && (cache_misses != 16'hFFFF))
+            cache_misses <= cache_misses + 1'b1;
+    end
+end
+
+always @(posedge clk_sys or negedge _cpuReset) begin
+    if (!_cpuReset || cache_clr)
+        cache_fills <= 16'd0;
+    else if (cache_fill_pulse && (cache_fills != 16'hFFFF))
+        cache_fills <= cache_fills + 1'b1;
+end
 
 fx68k fx68k (
 	.clk        ( clk_cpu ),
@@ -535,6 +621,9 @@ dataController #(SCSI_DEVS) dc0
 	.hw_turbo_en(hw_turbo_en),
 	.hw_turbo_ovr(hw_turbo_ovr),
 	.hw_cache_en(hw_cache_en),
+	.cache_hits(cache_hits),
+	.cache_misses(cache_misses),
+	.cache_fills(cache_fills),
 	.cpuBusControl(cpuBusControl),
 	.videoBusControl(videoBusControl),
 	.cycleReady(busPhase == 3'd7),

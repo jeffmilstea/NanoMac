@@ -141,7 +141,7 @@ module addrDecoder(
 				if (address[19]) // E8 000 - EF FFF
 					selectVIA = !_cpuAS;
 			4'b1111: begin // F0 0000 - FF FFFF: test software & diagnostic space
-				if (address[19:16] == 4'h8 && address[15:3] == 13'h0) // F8 0000 - F8 0007: NanoMac HW registers
+				if (address[19:16] == 4'h8 && address[15:4] == 12'h0) // F8 0000 - F8 000F: NanoMac HW registers
 					selectHardwareRegs = !_cpuAS;
 			end
 			default:

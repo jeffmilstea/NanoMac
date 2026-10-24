@@ -39,6 +39,9 @@ module dataController (
 	output reg	       hw_turbo_en,
 	output reg	       hw_turbo_ovr,
 	output reg	       hw_cache_en,
+	input [15:0]	       cache_hits,    // BRAM cache statistics (RO readout)
+	input [15:0]	       cache_misses,
+	input [15:0]	       cache_fills,
 	input		       _cpuVMA,
 	
 	// RAM/ROM:
@@ -218,7 +221,7 @@ module dataController (
 		!_viaIrq?3'b110:
 		3'b111;
 		
-	// Hardware Diagnostic & Control Registers ($F80000 - $F80007):
+	// Hardware Diagnostic & Control Registers ($F80000 - $F8000C):
 	// $F80000 (RO): 16'h4E4D ('NM' for NanoMac)
 	// $F80002 (RO): 16'h0001 (Architecture / Build rev 1)
 	// $F80004 (R/W): Control & Status (write requires magic byte 0x55 in [15:8]):
@@ -227,13 +230,24 @@ module dataController (
 	//                [2] hw_cache_en  (R/W) — enables BRAM cache
 	//                [8] cpu_turbo_active (RO)
 	// $F80006 (RO): Git commit short hash — injected at synthesis time via GIT_HASH define
+	// $F80008 (RO): BRAM cache statistics, saturating 16-bit counters
+	//                [15:0] cache_hits   (cleared by writing 0x55xx to $F80008)
+	// $F8000A (RO): [15:0] cache_misses
+	// $F8000C (RO): [15:0] cache_fills
 	`ifndef GIT_HASH
 	`define GIT_HASH 16'hDEAD
 	`endif
-	wire [15:0] hwRegsDataOut = (cpuAddrRegLo == 2'b00) ? 16'h4E4D :
-	                            (cpuAddrRegLo == 2'b01) ? 16'h0001 :
-	                            (cpuAddrRegLo == 2'b10) ? { 5'd0, hw_cache_en, 1'b0, cpu_turbo_active, 6'd0, hw_turbo_ovr, hw_turbo_en } :
-	                            `GIT_HASH;
+	// HW register index: A4 (bit2 of cpuAddrRegMid) : A3:A2 (cpuAddrRegLo)
+	wire [2:0] hwRegIdx = { cpuAddrRegMid[2], cpuAddrRegLo };
+	wire [15:0] hwRegsDataOut =
+	    (hwRegIdx == 3'd0) ? 16'h4E4D :
+	    (hwRegIdx == 3'd1) ? 16'h0001 :
+	    (hwRegIdx == 3'd2) ? { 5'd0, hw_cache_en, 1'b0, cpu_turbo_active, 6'd0, hw_turbo_ovr, hw_turbo_en } :
+	    (hwRegIdx == 3'd3) ? `GIT_HASH :
+	    (hwRegIdx == 3'd4) ? cache_hits   :
+	    (hwRegIdx == 3'd5) ? cache_misses :
+	    (hwRegIdx == 3'd6) ? cache_fills  :
+	    16'h0000;
 
 	always @(posedge clk or negedge _cpuReset) begin
 		if (!_cpuReset) begin
