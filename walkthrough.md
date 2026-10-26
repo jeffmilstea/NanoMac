@@ -188,11 +188,11 @@ set_multicycle_path -hold  -from [get_cells {*Irc* *rIrd*}] -to [get_cells {*mic
 
 | Path | Description |
 |---|---|
-| [`src/companion/ila.sv`](file:///Users/Jeff/Library/Mobile%20Documents/com~apple~CloudDocs/NanoMac/src/companion/ila.sv) | 512x64 circular trace buffer & ICE CPU step/halt logic |
-| [`src/companion/ila_uart.sv`](file:///Users/Jeff/Library/Mobile%20Documents/com~apple~CloudDocs/NanoMac/src/companion/ila_uart.sv) | 2,000,000 baud hardware UART RX/TX controller, FIFO, command interpreter |
-| [`src/macplus/macplus.sv`](file:///Users/Jeff/Library/Mobile%20Documents/com~apple~CloudDocs/NanoMac/src/macplus/macplus.sv) | Probed bus signals + gated CPU clock enable hook |
-| [`src/tang/nano20k/top.sv`](file:///Users/Jeff/Library/Mobile%20Documents/com~apple~CloudDocs/NanoMac/src/tang/nano20k/top.sv) | Wired UART TX (Pin 69) and RX (Pin 70) directly to `ila_inst` |
-| [`src/tang/nano20k/nanomac.cst`](file:///Users/Jeff/Library/Mobile%20Documents/com~apple~CloudDocs/NanoMac/src/tang/nano20k/nanomac.cst) | Physical pin constraints for `uart_tx` and `uart_rx` |
-| [`src/tang/nano20k/nanomac.sdc`](file:///Users/Jeff/Library/Mobile%20Documents/com~apple~CloudDocs/NanoMac/src/tang/nano20k/nanomac.sdc) | Multicycle path timing constraints for `fx68k` instruction decode |
-| [`scripts/nanomac_ice.py`](file:///Users/Jeff/Library/Mobile%20Documents/com~apple~CloudDocs/NanoMac/scripts/nanomac_ice.py) | Host CLI and GTKWave VCD trace exporter |
+| [`src/companion/ila.sv`](file:////Users/Jeff/workspace/NanoMac/src/companion/ila.sv) | 512x64 circular trace buffer & ICE CPU step/halt logic |
+| [`src/companion/ila_uart.sv`](file:////Users/Jeff/workspace/NanoMac/src/companion/ila_uart.sv) | 2,000,000 baud hardware UART RX/TX controller, FIFO, command interpreter |
+| [`src/macplus/macplus.sv`](file:////Users/Jeff/workspace/NanoMac/src/macplus/macplus.sv) | Probed bus signals + gated CPU clock enable hook |
+| [`src/tang/nano20k/top.sv`](file:////Users/Jeff/workspace/NanoMac/src/tang/nano20k/top.sv) | Wired UART TX (Pin 69) and RX (Pin 70) directly to `ila_inst` |
+| [`src/tang/nano20k/nanomac.cst`](file:////Users/Jeff/workspace/NanoMac/src/tang/nano20k/nanomac.cst) | Physical pin constraints for `uart_tx` and `uart_rx` |
+| [`src/tang/nano20k/nanomac.sdc`](file:////Users/Jeff/workspace/NanoMac/src/tang/nano20k/nanomac.sdc) | Multicycle path timing constraints for `fx68k` instruction decode |
+| [`scripts/nanomac_ice.py`](file:////Users/Jeff/workspace/NanoMac/scripts/nanomac_ice.py) | Host CLI and GTKWave VCD trace exporter |
 

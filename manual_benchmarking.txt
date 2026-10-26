@@ -102,3 +102,40 @@ Note: No lockup. All 3 iterations complete. 7.8 MHz and 19.6 MHz scores are
       nearly identical as expected -- without a BRAM cache the machine is
       memory-bound, so higher CPU clock does not improve throughput. The cache
       feature (feature/bram-cache) is required to realize turbo mode gains.
+
+After the first implementation of the cache:
+Speedometer 4.02 Benchmark Mix - Dhrystone test:
+Iterations = 3
+  Abs = 557.291, Rat = 0.032 =  7.8Mhz
+  Abs = 536.057, Rat = 0.031 =  19.6Mhz
+
+Speedometer 4.02 Benchmark Mix - Sieve test:
+Iterations = 3
+  Abs = 597.213, Rat = 0.002 = 7.8Mhz
+  Abs = 595.821, Rat = 0.002 = 19.6Mhz
+
+========================
+Oct 23, quick re-test after starting project again with Qwen 3.8 27B
+on branch feature/bram-cache
+cache = enabled in OSD
+
+Speedometer 4.02 Benchmark Mix - Dhrystone test:
+Iterations = 3
+  Abs = 548.244, Rat = 0.031 =  19.6Mhz
+
+Speedometer 4.02 Benchmark Mix - Sieve test:
+Iterations = 3
+  Abs = 596.871, Rat = 0.017 = 19.6Mhz
+========================
+Oct 25, after cache is purportedly working
+cache = enabled in OSD, Turbo = off
+
+Speedometer 4.02 Benchmark Mix - Dhrystone test:
+Iterations = 1
+  Abs = 569.473, Rat = 0.032 =  7.8Mhz
+
+Speedometer 4.02 Benchmark Mix - Sieve test:
+Iterations = 1
+  Abs = 1791.790, Rat = 0.016 = 7.8Mhz
+
+========================

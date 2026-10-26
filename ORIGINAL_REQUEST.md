@@ -4,7 +4,7 @@
 
 This is a single self-contained fix; keep it small and focused. Implement an asynchronous wait-state DTACK engine for NanoMac (Apple Macintosh Plus on Tang Nano 20K) to enable functional 68000 CPU Turbo acceleration without memory bus collisions or system crashes, operating over the production external SPI Flash ROM and SDRAM memory architecture.
 
-Working directory: /Users/Jeff/Library/Mobile Documents/com~apple~CloudDocs/NanoMac
+Working directory: /Users/Jeff/workspace/NanoMac
 Integrity mode: development
 
 ## Requirements

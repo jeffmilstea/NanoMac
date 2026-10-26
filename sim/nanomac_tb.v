@@ -9,6 +9,7 @@ module nanomac_tb
    input [1:0]	    ram_size,
    input [1:0]	    turbo,
    input	    fastboot,
+   input	    cache,
    
    output [4:0]	    leds,
    
@@ -66,11 +67,22 @@ module nanomac_tb
    output [1:0]	    sdram_ds,
    output [20:0]    ram_addr,
    output [15:0]    sdram_din,
-   input [15:0]	    sdram_do
+   input [15:0]	    sdram_do,
+
+   // cache debug (tb oracle)
+   output	    cache_hit_dbg,
+   output [15:0]    cache_data_dbg,
+   output [15:0]    cpu_data_in_dbg,
+   output [15:0]    cache_hits_dbg,
+   output [15:0]    cache_misses_dbg,
+   output [15:0]    cache_fills_dbg,
+   output [23:1]    cache_fill_addr_dbg,
+   output [47:0]    mac_probes_dbg
    );
 
-wire		    ram_ready;   
+wire		    ram_ready;
 wire [15:0]	    sdram_dout;
+wire		    enPhi1_raw, enPhi2_raw;
    
 sdram sdram (
              .clk(clk),               // sdram is accessed at 16MHz
@@ -177,6 +189,7 @@ macplus macplus (
 	.configRAMSize(ram_size),   // 128k, 512k, 1MB or 4MB
 	.configMachineType(1'b0),   // Plus, SE
 	.configTurbo(turbo),        // 0=Off, 1=2x, 2=4x, 3=Max
+	.configCache(cache),        // tb cache enable
 	.configFloppyWProt(2'b00),  // no write protection
 
         .leds(leds),
@@ -214,11 +227,36 @@ macplus macplus (
 	.sdram_we(sdram_we),
 	.sdram_oe(sdram_oe),
 	.sdram_do(sdram_dout), // sdram_do (sim sram), sdram_dout = (sim sdram)
- 
-        .UART_TXD(uart_txd),
-        .UART_RXD(uart_rxd),
-        .UART_RTS(),
-        .UART_CTS(1'b1)
+
+	       // ILA/ICE: no ila in sim. Bypass the clock gating (raw phis back)
+	       // and leave the poke interface unconnected.
+	       .enPhi1_raw(enPhi1_raw),
+	       .enPhi2_raw(enPhi2_raw),
+	       .enPhi1_gated(enPhi1_raw),
+	       .enPhi2_gated(enPhi2_raw),
+	       .cpu_reset_override(1'b0),
+	       .ice_poke_valid(1'b0),
+	       .ice_poke_idx(3'd0),
+	       .ice_poke_data(16'd0),
+	       .ice_peek_req(1'b0),
+	       .ice_peek_idx(3'd0),
+	       .ice_peek_data(),
+
+	       // cache debug
+	       .cache_hit_probe(cache_hit_dbg),
+	       .cache_data_dbg(cache_data_dbg),
+	       .cpu_data_in_dbg(cpu_data_in_dbg),
+	       .cache_hits(cache_hits_dbg),
+	       .cache_misses(cache_misses_dbg),
+	       .cache_fills(cache_fills_dbg),
+	       .last_fill_addr(cache_fill_addr_dbg),
+	       .mac_probes(mac_probes_dbg),
+
+	       .UART_TXD(uart_txd),
+	       .UART_RXD(uart_rxd),
+	       .UART_RTS(),
+	       .UART_CTS(1'b1)
 );
+
 
 endmodule

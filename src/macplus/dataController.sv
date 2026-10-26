@@ -22,6 +22,7 @@ module dataController (
 	input [3:0]	       cpuAddrRegHi, // A12-A9
 	input [2:0]	       cpuAddrRegMid, // A6-A4
 	input [1:0]	       cpuAddrRegLo, // A2-A1
+	input		       cpuAddrRegA3, // A3 (was missing -> HW reg index bug)
 	input		       _cpuUDS,
 	input		       _cpuLDS, 
 	input		       _cpuRW,
@@ -42,7 +43,18 @@ module dataController (
 	input [15:0]	       cache_hits,    // BRAM cache statistics (RO readout)
 	input [15:0]	       cache_misses,
 	input [15:0]	       cache_fills,
+	input [23:1]	       last_fill_addr, // snapshot of last miss-fill address
+	input		       last_fill_is_rom,
 	input		       _cpuVMA,
+
+	// ICE poke/peek interface (same clock domain as ila, i.e. clk_pixel == clk):
+	// poke: 1-cycle pulse from ila_uart; writes control regs and/or clears counters
+	input		       ice_poke_valid,
+	input [2:0]	       ice_poke_idx,
+	input [15:0]	       ice_poke_data,
+	output reg [15:0]     ice_peek_data,  // latched on ice_peek_req
+	input		       ice_peek_req,
+	input [2:0]	       ice_peek_idx,
 	
 	// RAM/ROM:
 	input		       videoBusControl, 
@@ -221,24 +233,26 @@ module dataController (
 		!_viaIrq?3'b110:
 		3'b111;
 		
-	// Hardware Diagnostic & Control Registers ($F80000 - $F8000C):
+	// Hardware Diagnostic & Control Registers ($F80000 - $F8001F, 8 words):
 	// $F80000 (RO): 16'h4E4D ('NM' for NanoMac)
-	// $F80002 (RO): 16'h0001 (Architecture / Build rev 1)
-	// $F80004 (R/W): Control & Status (write requires magic byte 0x55 in [15:8]):
+	// $F80004 (RO): 16'h0001 (Architecture / Build rev 1)
+	// $F80008 (R/W): Control & Status (write requires magic byte 0x55 in [15:8]):
 	//                [0] hw_turbo_en  (R/W)
 	//                [1] hw_turbo_ovr (R/W)
 	//                [2] hw_cache_en  (R/W) — enables BRAM cache
 	//                [8] cpu_turbo_active (RO)
-	// $F80006 (RO): Git commit short hash — injected at synthesis time via GIT_HASH define
-	// $F80008 (RO): BRAM cache statistics, saturating 16-bit counters
-	//                [15:0] cache_hits   (cleared by writing 0x55xx to $F80008)
-	// $F8000A (RO): [15:0] cache_misses
-	// $F8000C (RO): [15:0] cache_fills
+	// $F8000C (RO): Git commit short hash — injected at synthesis time via GIT_HASH define
+	// $F80010 (RO): [15:0] cache_hits   (cleared by writing 0x55xx to this slot)
+	// $F80014 (RO): [15:0] cache_misses
+	// $F80018 (RO): [15:0] cache_fills
+	// $F8001C (RO): Last miss-fill snapshot: {last_fill_is_rom, 1'b0, last_fill_addr[13:1], 1'b0}
 	`ifndef GIT_HASH
 	`define GIT_HASH 16'hDEAD
 	`endif
-	// HW register index: A4 (bit2 of cpuAddrRegMid) : A3:A2 (cpuAddrRegLo)
-	wire [2:0] hwRegIdx = { cpuAddrRegMid[2], cpuAddrRegLo };
+	// HW register index: A4 (bit2 of cpuAddrRegMid) : A3 : A2 (bit1 of cpuAddrRegLo)
+	// (8 word slots; A0 must be 0 for word access. The previous {A4,A2,A1} decode
+	// dropped A3, which aliased $F80008/$F8000C onto the wrong slots.)
+	wire [2:0] hwRegIdx = { cpuAddrRegMid[2], cpuAddrRegA3, cpuAddrRegLo[1] };
 	wire [15:0] hwRegsDataOut =
 	    (hwRegIdx == 3'd0) ? 16'h4E4D :
 	    (hwRegIdx == 3'd1) ? 16'h0001 :
@@ -247,15 +261,42 @@ module dataController (
 	    (hwRegIdx == 3'd4) ? cache_hits   :
 	    (hwRegIdx == 3'd5) ? cache_misses :
 	    (hwRegIdx == 3'd6) ? cache_fills  :
+	    (hwRegIdx == 3'd7) ? { last_fill_is_rom, 1'b0, last_fill_addr[13:1], 1'b0 } :
 	    16'h0000;
 
+	// ICE peek: select by the requested slot (independent of the CPU address
+	// bits, which are whatever the CPU is doing) and latch it so the
+	// same-domain UART FSM can print it.
+	wire [15:0] ice_peek_sel =
+	    (ice_peek_idx == 3'd0) ? 16'h4E4D :
+	    (ice_peek_idx == 3'd1) ? 16'h0001 :
+	    (ice_peek_idx == 3'd2) ? { 5'd0, hw_cache_en, 1'b0, cpu_turbo_active, 6'd0, hw_turbo_ovr, hw_turbo_en } :
+	    (ice_peek_idx == 3'd3) ? `GIT_HASH :
+	    (ice_peek_idx == 3'd4) ? cache_hits   :
+	    (ice_peek_idx == 3'd5) ? cache_misses :
+	    (ice_peek_idx == 3'd6) ? cache_fills  :
+	    (ice_peek_idx == 3'd7) ? { last_fill_is_rom, 1'b0, last_fill_addr[13:1], 1'b0 } :
+	    16'h0000;
+	always @(posedge clk) begin
+		if (ice_peek_req)
+			ice_peek_data <= ice_peek_sel;
+	end
+
+	// CPU-side control register write: slot $F80008 (idx 2) only, magic 0x55.
+	// Control registers: single driver (two always blocks on the same regs is
+	// not synthesizable). ICE poke (from 'P' UART command, single-cycle, issued
+	// while CPU is idle) takes priority over the CPU write path.
 	always @(posedge clk or negedge _cpuReset) begin
 		if (!_cpuReset) begin
 			hw_turbo_en  <= 1'b0;
 			hw_turbo_ovr <= 1'b0;
 			hw_cache_en  <= 1'b0;
+		end else if (ice_poke_valid && (ice_poke_idx == 3'd2) && (ice_poke_data[15:8] == 8'h55)) begin
+			hw_turbo_en  <= ice_poke_data[0];
+			hw_turbo_ovr <= ice_poke_data[1];
+			hw_cache_en  <= ice_poke_data[2];
 		end else if (clk8_en_p) begin
-			if (selectHardwareRegs && !_cpuAS && !_cpuRW && (cpuAddrRegLo == 2'b10) && (cpuDataIn[15:8] == 8'h55)) begin
+			if (selectHardwareRegs && !_cpuAS && !_cpuRW && (hwRegIdx == 3'd2) && (cpuDataIn[15:8] == 8'h55)) begin
 				if (!_cpuLDS) begin
 					hw_turbo_en  <= cpuDataIn[0];
 					hw_turbo_ovr <= cpuDataIn[1];

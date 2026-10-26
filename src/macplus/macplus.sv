@@ -95,9 +95,20 @@ module macplus
 	output		       _cpuAS_probe,
 	output		       cache_hit_probe,   // ILA: 1 when cache hit in progress
 	output		       cache_en_probe,    // ILA: 1 when cache is enabled
+	output [15:0]	       cache_data_dbg,  // debug/tb: word currently served by cache
+	output [15:0]	       cpu_data_in_dbg, // debug/tb: CPU data in (for oracle cross-check)
 	output [15:0]	       cache_hits,      // stat: cache hits since last clear
 	output [15:0]	       cache_misses,    // stat: cache misses since last clear
 	output [15:0]	       cache_fills,     // stat: miss fills since last clear
+	output [23:1]	       last_fill_addr,  // snapshot: address of last miss fill
+	output		       last_fill_is_rom,
+	// ICE poke/peek (companion ila domain == clk_sys, no CDC needed)
+	input		       ice_poke_valid,
+	input [2:0]	       ice_poke_idx,
+	input [15:0]	       ice_poke_data,
+	output [15:0]	       ice_peek_data,
+	input		       ice_peek_req,
+	input [2:0]	       ice_peek_idx,
 	output		       enPhi1_raw,
 	output		       enPhi2_raw,
 	input		       enPhi1_gated,
@@ -372,6 +383,8 @@ wire        cache_wr_pulse  = !_cpuRW && selectRAM && !_cpuAS && (busPhase == 3'
 
 wire        cache_hit;
 wire [15:0] cache_data;
+assign      cache_data_dbg = cache_data;
+assign      cpu_data_in_dbg = dataControllerDataOut; // iEdb: what the 68k latches
 
 bram_cache cache0 (
     .clk_sys      ( clk_sys           ),
@@ -382,7 +395,7 @@ bram_cache cache0 (
     .cpu_wr_pulse ( cache_wr_pulse    ),
     .cpu_wr_addr  ( cpuAddr           ),
     .fill_pulse   ( cache_fill_pulse  ),
-    .fill_addr    ( cpuAddr           ),
+    .fill_addr    ( fill_addr         ),
     .fill_data    ( cache_fill_data   ),
     .cache_hit    ( cache_hit         ),
     .cache_data   ( cache_data        )
@@ -407,21 +420,27 @@ assign _cpuDTACK = _cpuDTACK_int;
 // ---------------------------------------------------------------------------
 // Cache miss fill + hit/miss/fill statistics
 // ---------------------------------------------------------------------------
-// Why the original implementation never filled in turbo: the 68000 deasserts
-// /AS a few CPU cycles after it samples DTACK. In turbo mode (19.58 MHz,
-// ~10 CPU cycles per bus phase) that happens well inside the DTACK-assert
-// phase, so req_rst asynchronously clears ram_req/rom_req before the next
-// clk_sys posedge -- the old DTACK-edge fill detector saw already-cleared
-// requests and never generated a fill pulse (100% miss rate, cache no-op).
+// NOTE: fx68k.eRWn is /RW (active LOW): _cpuRW==1 means READ, ==0 means WRITE.
+// Fills must be generated on READ misses. (The original detector used
+// !_cpuRW, i.e. it "filled" on RAM writes -- storing the stale read-data
+// register doutD into the just-invalidated line, corrupting read-backs.)
 //
-// The 68000 holds A[23:0] stable while /AS is low, and DTACK cannot assert
-// before phase 3 (cache hit) / phase 4 (stock miss) / phase 7 (turbo miss).
-// Therefore:
-//   * posedge 3->4: miss is known (cache_hit valid since phase 3) and /AS is
-//     still low in BOTH modes for a miss -> latch fill address + ROM/RAM type.
-//   * posedge 6->7: SDRAM/ROM data is guaranteed valid (a miss DTACKs no
-//     earlier than phase 7) -> issue the 1-cycle fill pulse with the data.
-wire miss_evt_p3 = (busPhase == 3'd3) && !_cpuAS && !_cpuRW &&
+// Miss detection: the 68000 deasserts /AS a few CPU cycles after it samples
+// DTACK; in turbo that can happen before the next clk_sys posedge, so req_rst
+// asynchronously clears ram_req/rom_req. Therefore the miss is latched at
+// posedge 3->4 (cache_hit is valid from phase 3; /AS is still low in both
+// modes for a miss).
+//
+// Fill phase (validated in Verilator, see sim/nanomac_tb.cpp cache oracle):
+//   the SDRAM controller issues the read on phase 2 and the data is valid
+//   from mid-cycle onward -- the fill samples sdram_do on the selected phase.
+// `FILLPH = phase during which the fill pulse/data are issued (default 6).
+// ---------------------------------------------------------------------------
+`ifndef FILLPH
+`define FILLPH 6
+`endif
+
+wire miss_evt_p3 = (busPhase == 3'd3) && !_cpuAS && _cpuRW &&
                    (ram_req || rom_req) && !cache_hit && cache_cacheable;
 
 reg [23:1] fill_addr;
@@ -440,13 +459,25 @@ end
 reg        cache_fill_pulse;
 reg [15:0] cache_fill_data;
 always @(posedge clk_sys) begin
-    if (miss_latched && busPhase == 3'd6) begin
+    if (miss_latched && (busPhase == 3'd`FILLPH)) begin
         cache_fill_pulse <= 1'b1;
         cache_fill_data  <= fill_is_rom ? romDataMod : sdram_do;
     end else begin
         cache_fill_pulse <= 1'b0;
     end
 end
+
+// Last-fill snapshot (readout via $F8001C)
+reg [23:1] last_fill_addr_r;
+reg        last_fill_is_rom_r;
+always @(posedge clk_sys) begin
+    if (cache_fill_pulse) begin
+        last_fill_addr_r   <= fill_addr;
+        last_fill_is_rom_r <= fill_is_rom;
+    end
+end
+assign last_fill_addr   = last_fill_addr_r;
+assign last_fill_is_rom = last_fill_is_rom_r;
 
 // Per-cycle hit/miss classification, fully in the clk_sys domain so it is
 // immune to the asynchronous /AS deassert. The cycle type is latched at
@@ -456,7 +487,7 @@ end
 reg [3:0] cyc_type_r; // {active, is_read, is_rom, is_ram}
 always @(posedge clk_sys) begin
     if (busPhase == 3'd2)
-        cyc_type_r <= { !_cpuAS, !_cpuRW, rom_req, ram_req };
+        cyc_type_r <= { !_cpuAS, _cpuRW, rom_req, ram_req }; // _cpuRW==1 => read (/RW active low)
 end
 
 wire cyc_mem_rd = cyc_type_r[3] && cyc_type_r[2] && (cyc_type_r[0] | cyc_type_r[1]);
@@ -469,30 +500,37 @@ always @(posedge clk_sys) begin
     end
 end
 
-// Saturating counters. Cleared by writing 0x55xx to $F80008.
-reg [15:0] cache_hits   = 16'd0;
-reg [15:0] cache_misses = 16'd0;
-reg [15:0] cache_fills  = 16'd0;
+// Saturating counters (outputs driven by *_r registers).
+// Cleared by writing 0x55xx to $F80010 (the hits slot, idx 4).
+reg [15:0] cache_hits_r   = 16'd0;
+reg [15:0] cache_misses_r = 16'd0;
+reg [15:0] cache_fills_r  = 16'd0;
+assign cache_hits   = cache_hits_r;
+assign cache_misses = cache_misses_r;
+assign cache_fills  = cache_fills_r;
+// cpuAddr is [23:1] (A0 not present): $F80010 => A5=1, A4/A3/A2/A1=0
+// $F80010 (hits slot, reg-index 4): A4=1, A3=0, A2=0.
+// cpuAddr[23:1] has cpuAddr[3]=A4, cpuAddr[2]=A3, cpuAddr[1]=A2 (no A1/A0).
 wire cache_clr = selectHardwareRegs && !_cpuAS && !_cpuRW && !_cpuLDS &&
                  (cpuAddr[3]) && (cpuAddr[2:1] == 2'b00) &&
                  (cpuDataOut[15:8] == 8'h55);
 always @(posedge clk_sys or negedge _cpuReset) begin
     if (!_cpuReset || cache_clr) begin
-        cache_hits   <= 16'd0;
-        cache_misses <= 16'd0;
+        cache_hits_r   <= 16'd0;
+        cache_misses_r <= 16'd0;
     end else if (busPhase == 3'd7) begin
-        if (cyc_hit_flag  && (cache_hits   != 16'hFFFF))
-            cache_hits   <= cache_hits   + 1'b1;
-        if (cyc_miss_flag && (cache_misses != 16'hFFFF))
-            cache_misses <= cache_misses + 1'b1;
+        if (cyc_hit_flag  && (cache_hits_r   != 16'hFFFF))
+            cache_hits_r   <= cache_hits_r   + 1'b1;
+        if (cyc_miss_flag && (cache_misses_r != 16'hFFFF))
+            cache_misses_r <= cache_misses_r + 1'b1;
     end
 end
 
 always @(posedge clk_sys or negedge _cpuReset) begin
     if (!_cpuReset || cache_clr)
-        cache_fills <= 16'd0;
-    else if (cache_fill_pulse && (cache_fills != 16'hFFFF))
-        cache_fills <= cache_fills + 1'b1;
+        cache_fills_r <= 16'd0;
+    else if (cache_fill_pulse && (cache_fills_r != 16'hFFFF))
+        cache_fills_r <= cache_fills_r + 1'b1;
 end
 
 fx68k fx68k (
@@ -610,7 +648,8 @@ dataController #(SCSI_DEVS) dc0
 	.cpuDataOut(dataControllerDataOut), 	
 	.cpuAddrRegHi(cpuAddr[12:9]),
 	.cpuAddrRegMid(cpuAddr[6:4]),  // for SCSI
-	.cpuAddrRegLo(cpuAddr[2:1]),		
+	.cpuAddrRegLo(cpuAddr[2:1]),
+	.cpuAddrRegA3(cpuAddr[3]),
 	.selectSCSI(selectSCSI),
 	.selectSCC(selectSCC),
 	.selectIWM(selectIWM),
@@ -624,6 +663,14 @@ dataController #(SCSI_DEVS) dc0
 	.cache_hits(cache_hits),
 	.cache_misses(cache_misses),
 	.cache_fills(cache_fills),
+	.last_fill_addr(last_fill_addr_r),
+	.last_fill_is_rom(last_fill_is_rom_r),
+	.ice_poke_valid(ice_poke_valid),
+	.ice_poke_idx(ice_poke_idx),
+	.ice_poke_data(ice_poke_data),
+	.ice_peek_data(ice_peek_data),
+	.ice_peek_req(ice_peek_req),
+	.ice_peek_idx(ice_peek_idx),
 	.cpuBusControl(cpuBusControl),
 	.videoBusControl(videoBusControl),
 	.cycleReady(busPhase == 3'd7),

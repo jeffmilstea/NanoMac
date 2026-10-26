@@ -300,6 +300,122 @@ unsigned short ram[4*512*1024];  // 4 Megabytes
 // the sdram
 uint32_t sdram[2*1024*1024];  // 2M 32 bit words
 
+/* BRAM cache oracle: the testbench knows ground-truth memory contents
+   (ram[] and rom[]). Whenever the cache asserts a hit, the word it
+   serves must equal what memory actually holds at the CPU address. */
+static uint64_t co_hits = 0, co_hits_bad = 0, co_fills = 0;
+static int      co_first_write_ms = -1;
+static int      co_last_bad_ms = -1;
+static int      co_prev_dtack = 1;  // 1=deasserted, 0=asserted (/DTACK)
+// 12-tick ring buffer of (t_ms, probes, cache_data, cpuDataIn) for mismatch context
+static double   dbgt[12];
+static uint64_t dbgP[12];
+static uint16_t dbgC[12], dbgD[12];
+static int dbg_n = 0, dbg_dumped = 0;
+static void dbg_push(double t, uint64_t p, uint16_t c, uint16_t d) {
+  int i = dbg_n % 12;
+  dbgt[i] = t; dbgP[i] = p; dbgC[i] = c; dbgD[i] = d;
+  dbg_n++;
+}
+static void dbg_dump(double t) {
+  printf("%.3fms ===== MISMATCH CONTEXT (last %d ticks) =====\n", t*1000, dbg_n);
+  int cnt = dbg_n > 12 ? 12 : dbg_n;
+  for (int k = cnt; k > 0; k--) {
+    int i = (dbg_n - k) % 12;
+    uint64_t p = dbgP[i];
+    uint32_t addr = (p >> 24) & 0xFFFFFF;
+    printf("  t=%.4fms addr=%06X phase=%d AS=%d RW=%d LDS=%d UDS=%d ramReq=%d romReq=%d DTACK=%d cacheHit=%d cacheData=%04X cpuDataIn=%04X\n",
+           dbgt[i]*1000, addr, (int)(p & 7), (int)((p>>6)&1), (int)((p>>9)&1),
+           (int)((p>>8)&1), (int)((p>>7)&1), (int)((p>>11)&1), (int)((p>>12)&1),
+           (int)((p>>10)&1), (int)((p>>25)&1), dbgC[i], dbgD[i]);
+  }
+  printf("  ===== end context =====\n");
+}
+static int      co_hit_prev = 0;
+static int      co_boot_reached = 0;
+static int      co_last_fill = 0;
+
+// Ground truth: what the DUT's memory input actually holds at byte addr a.
+//  ROM: tb model drives romData = SWAP16(rom[n]).
+//  RAM: tb model drives sdram_do = SWAP16(ram[a>>1]) (ptr[0]*256+ptr[1]).
+static uint16_t oracle_mem_word(uint32_t a) {
+  if(a >= 0x400000)
+    return SWAP16(rom[(a-0x400000)>>1]);
+  return SWAP16(ram[a>>1]);
+}
+
+void cache_oracle(double t) {
+  static int last_sec = -1;
+  static uint32_t prev_addr = 0;
+  static int prev_ram_req = 0, prev_rom_req = 0, prev_delivery = 0;
+  int sec = (int)t;
+  if(sec != last_sec) {
+    last_sec = sec;
+    printf("ORACLE %ds: hits=%llu bad=%llu fills=%llu first_wr=%dms last_bad=%dms\n", sec,
+           (unsigned long long)co_hits, (unsigned long long)co_hits_bad,
+           (unsigned long long)co_fills, co_first_write_ms, co_last_bad_ms);
+  }
+  uint32_t addr = (tb->mac_probes_dbg >> 24) & 0xFFFFFF;
+  int ram_req = (tb->mac_probes_dbg >> 11) & 1;
+  int rom_req = (tb->mac_probes_dbg >> 12) & 1;
+  int is_wr   = !((tb->mac_probes_dbg >> 9) & 1); // bit 9 = _cpuRW (1=read)
+  if(is_wr && ram_req && co_first_write_ms < 0)
+    co_first_write_ms = (int)(t*1000*1000)/1000;
+
+  // Cache drives the data bus when cache_hit && (ram_req||rom_req).
+  // The BRAM read port is registered: cache_data at tick T was loaded from
+  // the line selected at tick T-1, so ground truth is prev_addr (stable
+  // during the access). Check on the first delivery tick of a hit window.
+  int delivery = tb->cache_hit_dbg && (ram_req || rom_req);
+
+  dbg_push(t, tb->mac_probes_dbg, tb->cache_data_dbg, tb->cpu_data_in_dbg);
+  int dtack = (tb->mac_probes_dbg >> 10) & 1; // _cpuDTACK (1=deasserted, 0=asserted)
+  int read  = (tb->mac_probes_dbg >> 9)  & 1; // _cpuRW (1=read)
+
+  // The 68k samples the data bus when /DTACK asserts (1 -> 0 transition) on a
+  // memory read. That is the one tick the delivered value must be correct.
+  if(co_prev_dtack == 1 && dtack == 0 && read && (ram_req || rom_req)) {
+    uint16_t delivered = tb->cpu_data_in_dbg;  // iEdb, the bus the CPU latches
+    uint16_t cachedata = tb->cache_data_dbg;   // word the cache produced
+    // Only flag when the CACHE actually drove the bus (delivered == cachedata)
+    // AND that word differs from memory. If delivered != cachedata the cache
+    // was not the source (e.g. boot-overlay ROM at low addresses) -> not a fault.
+    if(delivered == cachedata) {
+      co_hits++;
+      uint16_t exp = rom_req ? SWAP16(rom[tb->romAddr]) : SWAP16(ram[addr>>1]);
+      if(delivered != exp) {
+        co_hits_bad++;
+        co_last_bad_ms = (int)(t*1000*1000)/1000;
+        if(dbg_dumped < 3) { dbg_dump(t); dbg_dumped++; }
+        if(co_hits_bad <= 25)
+          printf("%.3fms CACHE FAULT: addr=%06X delivered=%04X expected=%04X ramReq=%d romReq=%d\n",
+                 t*1000, addr, delivered, exp, ram_req, rom_req);
+      }
+    }
+  }
+  co_prev_dtack = dtack;
+  prev_addr = addr;
+  prev_ram_req = ram_req;
+  prev_rom_req = rom_req;
+  prev_delivery = delivery;
+  co_hit_prev = delivery ? 1 : 0;
+
+  if(tb->cache_fills_dbg != co_last_fill) {
+    co_fills++;
+    co_last_fill = tb->cache_fills_dbg;
+    if(co_fills <= 8)
+      printf("%.3fms CACHE FILL number %d addr=%06X (rom=%c)\n",
+             t*1000, co_fills, (int)(tb->cache_fill_addr_dbg<<1),
+             (tb->cache_fill_addr_dbg & 0x800000) ? 'R':'M');
+  }
+
+  if(!co_boot_reached && addr >= 0x800000 && addr < 0x900000) {
+    co_boot_reached = 1;
+    printf("%.3fms *** BOOT ROM REACHED ($%06X) - RAM test PASSED ***\n",
+           t*1000, addr);
+  }
+}
+
 // proceed simulation by one tick
 void tick(int c) {
   static uint64_t ticks = 0;
@@ -405,6 +521,9 @@ void tick(int c) {
       // ALWAYS read rom- That way we don't have to wait for /AS
       tb->romData = SWAP16(rom[tb->romAddr]);
 
+    // BRAM cache integrity oracle
+    cache_oracle(simulation_time);
+
     if(tb->phase == 6) {
       // skip rom test
       if((simulation_time>1000000) && !tb->_romOE && ((tb->romAddr<<1)==0x18f44))
@@ -482,13 +601,16 @@ void tick(int c) {
 }
 
 void fexit(void) {
+#ifdef VIDEO
   if(ad) {
     fclose(ad);
     ad = NULL;
   }
+#endif
 }
 
 int main(int argc, char **argv) {
+  setvbuf(stdout, NULL, _IONBF, 0); // log in real time
   // Initialize Verilators variables
   Verilated::commandArgs(argc, argv);
   // Verilated::debug(1);
@@ -548,13 +670,19 @@ int main(int argc, char **argv) {
   tb->ram_size = RAM_SIZE;
   tb->fastboot = 1;
   tb->turbo = 0;
+  tb->cache = 0;
 
   for (int i = 1; i < argc; i++) {
     if (strcmp(argv[i], "--turbo") == 0 && i + 1 < argc) {
       tb->turbo = atoi(argv[++i]);
+    } else if (strcmp(argv[i], "--cache") == 0 && i + 1 < argc) {
+      tb->cache = atoi(argv[++i]);
+    } else if (strcmp(argv[i], "--fastboot") == 0 && i + 1 < argc) {
+      tb->fastboot = atoi(argv[++i]);
     }
   }
-  printf("NanoMac Simulation starting with Turbo mode = %d\n", tb->turbo);
+  printf("NanoMac Simulation starting with Turbo=%d cache=%d fastboot=%d\n",
+         tb->turbo, tb->cache, tb->fastboot);
   
   /* run for a while */
   while(
@@ -581,6 +709,14 @@ int main(int argc, char **argv) {
   }
   
   printf("stopped after %.3fms\n", 1000*simulation_time);
+  printf("ORACLE TIMING: first RAM write at %d ms, last flag at %d ms\n", co_first_write_ms, co_last_bad_ms);
+  printf("CACHE ORACLE SUMMARY: hits=%llu served-wrong=%llu fills=%llu boot-rom-reached=%d\n",
+         (unsigned long long)co_hits, (unsigned long long)co_hits_bad,
+         (unsigned long long)co_fills, co_boot_reached);
+  if(tb->cache)
+    printf("RTL counters: hits=%u misses=%u fills=%u last_fill_addr=%06X\n",
+           (unsigned)tb->cache_hits_dbg, (unsigned)tb->cache_misses_dbg,
+           (unsigned)tb->cache_fills_dbg, (unsigned)(tb->cache_fill_addr_dbg<<1));
   
   trace->close();
 
