@@ -33,7 +33,15 @@ module ila (
 
     // Direct hardware UART pins (FT2232 Channel 1)
     input               uart_rx,
-    output              uart_tx
+    output              uart_tx,
+
+    // Hardware register poke/peek to macplus (same clock domain)
+    output              ice_poke_valid,
+    output [2:0]        ice_poke_idx,
+    output [15:0]       ice_poke_data,
+    output              ice_peek_req,
+    output [2:0]        ice_peek_idx,
+    input  [15:0]       ice_peek_data
 );
 
     // -------------------------------------------------------------------------
@@ -470,7 +478,13 @@ module ila (
         .uart_arm_req(uart_arm_req),
         .uart_disarm_req(uart_disarm_req),
         .uart_force_trig_req(uart_force_trig_req),
-        .uart_trig_mode(uart_trig_mode)
+        .uart_trig_mode(uart_trig_mode),
+        .ice_poke_valid(ice_poke_valid),
+        .ice_poke_idx(ice_poke_idx),
+        .ice_poke_data(ice_poke_data),
+        .ice_peek_req(ice_peek_req),
+        .ice_peek_idx(ice_peek_idx),
+        .ice_peek_data(ice_peek_data)
     );
 
 endmodule

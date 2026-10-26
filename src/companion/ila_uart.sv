@@ -57,7 +57,15 @@ module ila_uart #(
     output reg          uart_arm_req,
     output reg          uart_disarm_req,
     output reg          uart_force_trig_req,
-    output reg [2:0]    uart_trig_mode
+    output reg [2:0]    uart_trig_mode,
+
+    // Hardware register poke/peek (same clock domain as macplus)
+    output reg          ice_poke_valid,
+    output reg [2:0]    ice_poke_idx,
+    output reg [15:0]   ice_poke_data,
+    output reg          ice_peek_req,
+    output reg [2:0]    ice_peek_idx,
+    input  [15:0]       ice_peek_data
 );
 
     // -------------------------------------------------------------------------
@@ -237,6 +245,9 @@ module ila_uart #(
     localparam S_DUMP_BIN   = 4'd5;
     localparam S_DUMP_HDR   = 4'd6;
     localparam S_DUMP_GAP   = 4'd7;
+    localparam S_PEEK_SET   = 4'd8;  // settle after ice_peek_req
+    localparam S_PEEK_PRINT = 4'd9;  // print one register line
+    localparam S_PEEK_COLLECT = 4'd10; // collect 2 bytes for poke
 
     reg [3:0]  state;
     reg [7:0]  msg_idx;
@@ -248,6 +259,12 @@ module ila_uart #(
     reg [9:0]  dump_cnt;
     reg [5:0]  dump_col;
     reg [2:0]  bin_byte_idx;
+    // P/Q poke/peek support
+    reg [2:0]  peek_slot;
+    reg [1:0]  peek_settle;
+    reg        poke_hi_rx;
+    reg [7:0]  poke_hi, poke_lo;
+    reg [1:0]  poke_cnt;
 
     reg        print_after_step;
     reg [63:0] sample_latch;
@@ -287,6 +304,8 @@ module ila_uart #(
             uart_arm_req        <= 0;
             uart_disarm_req     <= 0;
             uart_force_trig_req <= 0;
+            ice_poke_valid      <= 0;
+            ice_peek_req        <= 0;
             fifo_wr             <= 0;
 
             case (state)
@@ -381,6 +400,18 @@ module ila_uart #(
                                 trace_rd_addr <= 0;
                                 bin_byte_idx  <= 0;
                                 state         <= S_DUMP_BIN;
+                            end
+                            8'h50: begin // 'P' -> Poke $F80008 control word.
+                                        // Next 2 RX bytes: data hi, data lo (hi must be 0x55)
+                                poke_hi_rx <= 1'b0;
+                                state      <= S_PEEK_COLLECT;
+                            end
+                            8'h51: begin // 'Q' -> Peek all 8 hw regs ($F80000-1C)
+                                peek_slot  <= 0;
+                                ice_peek_req <= 1'b1;
+                                ice_peek_idx <= 3'd0;
+                                peek_settle  <= 2'd2;
+                                state        <= S_PEEK_SET;
                             end
                             default: ;
                         endcase
@@ -878,6 +909,75 @@ end
                                 dump_cnt      <= dump_cnt - 10'd1;
                                 dump_cur      <= dump_cur + 9'd1;
                                 trace_rd_addr <= dump_cur + 9'd1;
+                            end
+                        end
+                    end
+                end
+
+                // -------------------------------------------------------------
+                // Poke $F80008 control word: collect hi,lo then 1-cycle poke
+                // -------------------------------------------------------------
+                S_PEEK_COLLECT: begin
+                    if (rx_valid) begin
+                        if (!poke_hi_rx) begin
+                            poke_hi    <= rx_byte;
+                            poke_hi_rx <= 1'b1;
+                        end else begin
+                            ice_poke_valid <= 1'b1;
+                            ice_poke_idx   <= 3'd2;
+                            ice_poke_data  <= {poke_hi, rx_byte};
+                            state          <= S_IDLE;
+                        end
+                    end
+                end
+
+                // -------------------------------------------------------------
+                // Settle after an ice_peek_req (DUT latches next posedge)
+                // -------------------------------------------------------------
+                S_PEEK_SET: begin
+                    if (peek_settle == 2'd0) begin
+                        dump_col <= 0;
+                        state    <= S_PEEK_PRINT;
+                    end else begin
+                        peek_settle <= peek_settle - 2'd1;
+                    end
+                end
+
+                // -------------------------------------------------------------
+                // Print one register line: "F800XX: HHHH\r\n"
+                // (Q command walks all 8 slots, re-issuing the peek each time)
+                // -------------------------------------------------------------
+                S_PEEK_PRINT: begin
+                    if (fifo_has_room) begin
+                        fifo_wr  <= 1'b1;
+                        dump_col <= dump_col + 6'd1;
+                        case (dump_col)
+                            0:  fifo_din <= 8'h0D;
+                            1:  fifo_din <= 8'h0A;
+                            2:  fifo_din <= "F";
+                            3:  fifo_din <= "8";
+                            4:  fifo_din <= "0";
+                            5:  fifo_din <= "0";
+                            6:  fifo_din <= hex2ascii({3'd0, peek_slot[2]});  // (slot*4)>>4 -> 0 or 1
+                            7:  fifo_din <= hex2ascii({peek_slot[1:0], 2'b00});// (slot*4) low nibble
+                            8:  fifo_din <= ":";
+                            9:  fifo_din <= hex2ascii(ice_peek_data[15:12]);
+                            10: fifo_din <= hex2ascii(ice_peek_data[11:8]);
+                            11: fifo_din <= hex2ascii(ice_peek_data[7:4]);
+                            12: fifo_din <= hex2ascii(ice_peek_data[3:0]);
+                            13: fifo_din <= 8'h0D;
+                            14: fifo_din <= 8'h0A;
+                            default: fifo_din <= 8'h0A;
+                        endcase
+                        if (dump_col == 6'd14) begin
+                            if (peek_slot == 3'd7) begin
+                                state <= S_IDLE;
+                            end else begin
+                                peek_slot    <= peek_slot + 3'd1;
+                                ice_peek_req <= 1'b1;
+                                ice_peek_idx <= peek_slot + 3'd1;
+                                peek_settle  <= 2'd2;
+                                state        <= S_PEEK_SET;
                             end
                         end
                     end

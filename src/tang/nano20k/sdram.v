@@ -43,6 +43,8 @@ module sdram (
 	output		  ready, // ram is ready and has been initialized
 	input [15:0]	  din, // data input from chipset/cpu
 	output [15:0]	  dout,
+	output          rd_done,  // 1 posedge-cycle at STATE_READ (read data valid)
+	output [21:0]  rd_addr,   // 22-bit word address the FSM read (latched at trigger)
 	input [21:0]	  addr, // 22 bit word address
 	input [1:0]	  ds, // upper/lower data strobe
 	input		  oe, // cpu/chipset requests read
@@ -70,6 +72,10 @@ localparam STATE_LAST      = STATE_READ;  // last state in cycle
 
 reg [2:0] state;
 reg [4:0] init_state;
+reg [21:0] rd_addr_r;
+// Read-data-valid pulse: high for one posedge cycle at STATE_READ (reads only).
+assign rd_done = (state == STATE_READ) && !we && (init_state == 0);
+assign rd_addr = rd_addr_r;
 
 // Return data in read state directly and afterwards latched. This makes sure
 // data is returned as fast as possible and as long as possible
@@ -152,6 +158,7 @@ always @(posedge clk) begin
             sd_cmd <= CMD_ACTIVE;
             sd_addr <= addr[19:9];
             sd_ba <= addr[21:20];
+            rd_addr_r <= addr;   // for rd_addr reporting
             state <= 3'd1;
           end else
             sd_cmd <= CMD_AUTO_REFRESH;

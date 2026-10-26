@@ -34,6 +34,8 @@
 
 module bram_cache (
     input  wire        clk_sys,
+    input  wire        reset_n,        // system reset (deasserted after power-on)
+    input  wire        invalidate_all, // 0..LINES-1 cycles: clear all tags
 
     // CPU address (stable after _cpuAS asserts)
     input  wire [23:1] cpu_addr,
@@ -115,8 +117,24 @@ module bram_cache (
     wire [IDX_BITS-1:0] inv_idx  = cpu_wr_addr[IDX_BITS:1]; // cpu_wr_addr[10:1]
     wire [TAG_BITS-1:0] fill_tag = fill_addr[23:11];
 
+    // Power-on / enable-rise invalidation sweep: SRAM starts with
+    // uninitialized contents on the FPGA, so a garbage valid+tag could
+    // alias a real address and serve wrong data. On invalidate_all the
+    // whole tag array is swept to 0 (LINES posedge cycles).
+    reg [IDX_BITS:0] sweep_idx; // LINES bits: LINES = all done
+    always @(posedge clk_sys or negedge reset_n) begin
+        if (!reset_n)
+            sweep_idx <= 0;
+        else if (invalidate_all)
+            sweep_idx <= sweep_idx + 1'b1;
+        else
+            sweep_idx <= 0;
+    end
+
     always @(posedge clk_sys) begin
-        if (fill_pulse) begin
+        if (invalidate_all) begin
+            tag_ram[sweep_idx[IDX_BITS-1:0]] <= {(TAG_BITS+1){1'b0}};
+        end else if (fill_pulse) begin
             // Miss resolved: store returned word in cache
             data_ram[fill_idx] <= fill_data;
             tag_ram[fill_idx]  <= {1'b1, fill_tag}; // valid = 1

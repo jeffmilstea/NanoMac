@@ -40,6 +40,7 @@ module dataController (
 	output reg	       hw_turbo_en,
 	output reg	       hw_turbo_ovr,
 	output reg	       hw_cache_en,
+	output reg [1:0]    hw_fillph_turbo,  // reserved (fill is now data-valid based)
 	input [15:0]	       cache_hits,    // BRAM cache statistics (RO readout)
 	input [15:0]	       cache_misses,
 	input [15:0]	       cache_fills,
@@ -256,7 +257,9 @@ module dataController (
 	wire [15:0] hwRegsDataOut =
 	    (hwRegIdx == 3'd0) ? 16'h4E4D :
 	    (hwRegIdx == 3'd1) ? 16'h0001 :
-	    (hwRegIdx == 3'd2) ? { 5'd0, hw_cache_en, 1'b0, cpu_turbo_active, 6'd0, hw_turbo_ovr, hw_turbo_en } :
+	    // W: bit0=turbo_en bit1=turbo_ovr bit2=cache_en bit[5:4]=fillph_turbo (phase=4+val)
+	    // RO: bit8=turbo_active bit10=cache_en
+	    (hwRegIdx == 3'd2) ? { 5'd0, hw_cache_en, 1'b0, cpu_turbo_active, 2'b00, hw_fillph_turbo, 1'b0, hw_cache_en, hw_turbo_ovr, hw_turbo_en } :
 	    (hwRegIdx == 3'd3) ? `GIT_HASH :
 	    (hwRegIdx == 3'd4) ? cache_hits   :
 	    (hwRegIdx == 3'd5) ? cache_misses :
@@ -270,7 +273,7 @@ module dataController (
 	wire [15:0] ice_peek_sel =
 	    (ice_peek_idx == 3'd0) ? 16'h4E4D :
 	    (ice_peek_idx == 3'd1) ? 16'h0001 :
-	    (ice_peek_idx == 3'd2) ? { 5'd0, hw_cache_en, 1'b0, cpu_turbo_active, 6'd0, hw_turbo_ovr, hw_turbo_en } :
+	    (ice_peek_idx == 3'd2) ? { 5'd0, hw_cache_en, 1'b0, cpu_turbo_active, 2'b00, hw_fillph_turbo, 1'b0, hw_cache_en, hw_turbo_ovr, hw_turbo_en } :
 	    (ice_peek_idx == 3'd3) ? `GIT_HASH :
 	    (ice_peek_idx == 3'd4) ? cache_hits   :
 	    (ice_peek_idx == 3'd5) ? cache_misses :
@@ -288,19 +291,22 @@ module dataController (
 	// while CPU is idle) takes priority over the CPU write path.
 	always @(posedge clk or negedge _cpuReset) begin
 		if (!_cpuReset) begin
-			hw_turbo_en  <= 1'b0;
-			hw_turbo_ovr <= 1'b0;
-			hw_cache_en  <= 1'b0;
+			hw_turbo_en     <= 1'b0;
+			hw_turbo_ovr    <= 1'b0;
+			hw_cache_en     <= 1'b0;
+			hw_fillph_turbo <= 2'b11; // default: fill at phase 7 (turbo)
 		end else if (ice_poke_valid && (ice_poke_idx == 3'd2) && (ice_poke_data[15:8] == 8'h55)) begin
-			hw_turbo_en  <= ice_poke_data[0];
-			hw_turbo_ovr <= ice_poke_data[1];
-			hw_cache_en  <= ice_poke_data[2];
+			hw_turbo_en     <= ice_poke_data[0];
+			hw_turbo_ovr    <= ice_poke_data[1];
+			hw_cache_en     <= ice_poke_data[2];
+			hw_fillph_turbo <= ice_poke_data[5:4];
 		end else if (clk8_en_p) begin
 			if (selectHardwareRegs && !_cpuAS && !_cpuRW && (hwRegIdx == 3'd2) && (cpuDataIn[15:8] == 8'h55)) begin
 				if (!_cpuLDS) begin
-					hw_turbo_en  <= cpuDataIn[0];
-					hw_turbo_ovr <= cpuDataIn[1];
-					hw_cache_en  <= cpuDataIn[2];
+					hw_turbo_en     <= cpuDataIn[0];
+					hw_turbo_ovr    <= cpuDataIn[1];
+					hw_cache_en     <= cpuDataIn[2];
+					hw_fillph_turbo <= cpuDataIn[5:4];
 				end
 			end
 		end

@@ -147,6 +147,60 @@ Added -Wno-ENUMVALUE (fx68k.sv:2339 implicit enum conversion).
   counter clear ($F80010) is CPU-write only; counters readable via
   $F80010-18 if dataController map done (it is). Peek via ICE still missing.
 
+
+## TURBO + CACHE: LIVE REPRO + ILA EVIDENCE (2026-10-26 night)
+
+### Arithmetic correction (invalidates earlier sweeps)
+turbo_en|turbo_ovr|cache_en = 0x03 (NOT 0x13/0x07). Full poke lo byte =
+0x03 | (fillph<<4): phase4=7, phase5=23, phase6=39, phase7=55 (decimal).
+Earlier sweeps (99/67/35/3, 51/0x33, 55/0x33) ALL RAN CACHE OFF (bit2=0).
+Only 'poke 55' (0x37) has ever actually run turbo+cache.
+
+### poke 55 result: machine FREEZES immediately (not stripey bars)
+peek after freeze: F80008:0537 (all on, fillph=3=phase7, turbo_active)
+  F80010:0000 hits, F80014:0000 misses, F80018:FFFF fills SATURATED,
+  F8001C:1B7E (last fill ~0x0DDFC RAM, is_rom=0)
+ILA trace of frozen state:
+- C$EN=1 and C$HIT=1 on normal RAM cycles (phases 5,6,7,0,1,2,3)
+- CPU spinning loop: 4027E2 R / 40274A R / 00016A R / 00016C R /
+  40274C R / 3CCE36 W / 3CCE38 W ... (0001xx = ROM RAM test area!)
+- sdram_dout changes at phase 6 in turbo (current-cycle data valid ~ph6-7)
+- /AS pulses land at varying phase-grid positions in turbo; 1 phase-grid
+  (511ns @15.667MHz) = 2.5 turbo E-cycles (204ns each)
+- Suspect: cache serves stale data for write-then-read-back (write-
+  invalidate misaligned in turbo) or miss/fill latch neighbor-cycle addr.
+
+### Architecture facts (verified in RTL)
+- clk_sys = clk_pixel 15.6672MHz in BOTH modes; busPhase grid (clocks.v)
+  on clk_sys always. Turbo: 68k on clk_cpu_raw 39.168MHz (top.sv DCS).
+- Data path: ramDataIn = (cache_hit && ram_req) ? cache_data : sdram_do.
+  DTACK: ram_done = cache_hit || (turbo ? ph>=7 : ph>=4).
+- ram_req/rom_req set only at busPhase==2, async-cleared by /AS deassert
+  (req_rst = !_cpuReset || _cpuAS).
+- miss_evt latched ph3; counters: type@ph2, hit@ph3, count@ph7 => all
+  misaligned in turbo (explains hits=0 while C$HIT=1 visible).
+- fills saturated => fill pulse fires every cycle in turbo.
+
+### Candidate root causes (both = phase-alignment in turbo)
+B1) write-invalidate phase misaligned in turbo -> stale line served ->
+    spin on own write read-back (matches spin loop + RAM-test addresses)
+B2) fill tag from fill_addr latched at ph3 which in turbo can be the
+    PREVIOUS cycle's address -> lines tagged wrong -> constant refill
+    (matches fills=FFFF)
+
+### Recovery / A/B interface notes
+- Machine: run 'reset' via ICE to recover (clears hw control regs!).
+- NEVER run 'reset' after a poke you want to keep - it clears the regs.
+- peek prints all 8 regs; F80008: bit0 turbo_en, bit1 ovr, bit2 cache,
+  bits[5:4] fillph(phase-4), bit8 RO turbo_active, bit10 RO cache mirror.
+- ICE port: /dev/cu.usbserial-20230306211 @ 2MHz.
+
+### Next steps
+- Make req/miss/fill/invalidate phase-robust in turbo (level windows
+  instead of fixed phases) OR capture VCD with extra probe bits
+  (E-phase, iEdb, fill_pulse, invalidate, tag of 00016A).
+- Machine needs recovery via ICE reset or power cycle.
+
 ## Clocks/phase reference (stock mode)
 clk_sys=clk_pixel=15.6672MHz; 8 phases per E-cycle; /AS low from phase 2;
 ram_req/rom_req set at phase 2; cache_hit valid from phase 3; DTACK: hit@3,

@@ -282,7 +282,7 @@ def main():
     parser = argparse.ArgumentParser(description="NanoMac ILA & ICE Debugger")
     parser.add_argument("--port", help="Serial port (default: auto-detect)")
     parser.add_argument("--baud", type=int, default=2000000, help="Baud rate (default: 2000000)")
-    parser.add_argument("command", choices=["state", "halt", "resume", "reset", "step", "stepbus", "arm", "trigger", "dump", "interactive"])
+    parser.add_argument("command", choices=["state", "halt", "resume", "reset", "step", "stepbus", "arm", "trigger", "dump", "interactive", "poke", "peek"])
     parser.add_argument("count", nargs="?", type=int, default=1, help="Step count")
     parser.add_argument("--vcd", help="Save dump to VCD file for GTKWave")
 
@@ -307,6 +307,23 @@ def main():
         cmd_trigger(ser)
     elif args.command == "dump":
         cmd_dump_binary(ser, args.vcd)
+    elif args.command == "poke":
+        # write $F80008 control word: lo = args.count
+        #   bit0=turbo_en bit1=turbo_ovr bit2=cache_en bits[5:4]=turbo fill phase-4
+        # e.g. 'poke 44' = 0x5544 -> fillph=2 (phase 6), cache on, ovr on
+        ser.reset_input_buffer()
+        lo = (args.count & 0xFF) if args.count else 0
+        ser.write(b"P" + bytes([0x55, lo]))
+        time.sleep(0.05)
+        resp = ser.read(64).decode("utf-8", errors="replace").strip()
+        print(f"[NanoMac ICE] Poked $F80008 lo=0x{lo:02X} (fillph phase={4 + ((lo >> 4) & 3)}) {resp}")
+    elif args.command == "peek":
+        # read all 8 hw registers $F80000-$F8001C
+        ser.reset_input_buffer()
+        ser.write(b"Q")
+        time.sleep(0.15)
+        resp = ser.read(512).decode("utf-8", errors="replace").strip()
+        print(f"[NanoMac ICE] Peek:\n{resp}")
     elif args.command == "interactive":
         print("NanoMac ICE Interactive Console. Commands: s, H, r, R, 1, 8, b, a, A, d, D, B, q")
         while True:

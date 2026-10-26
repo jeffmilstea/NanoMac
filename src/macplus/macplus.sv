@@ -89,6 +89,9 @@ module macplus
 	output		       sdram_we,
 	output		       sdram_oe,
 	input [15:0]	       sdram_do,
+	input       	       sdram_rd_done, // SDRAM FSM read-data-valid pulse (clk_sys)
+	input [20:0]	       sdram_rd_addr, // CPU-domain word addr FSM read (= cpuAddr[21:1]);
+	                                   // board/tb invert the controller's mapped address here
 
 	// ILA / ICE debug probe and execution control interface
 	output [47:0]	       mac_probes,
@@ -109,6 +112,9 @@ module macplus
 	output [15:0]	       ice_peek_data,
 	input		       ice_peek_req,
 	input [2:0]	       ice_peek_idx,
+	// Hardware turbo override (written via $F80008 or ICE poke) -> top DCS
+	output		       hw_turbo_en_o,
+	output		       hw_turbo_ovr_o,
 	output		       enPhi1_raw,
 	output		       enPhi2_raw,
 	input		       enPhi1_gated,
@@ -199,6 +205,9 @@ wire vid_alt, loadPixels, _hblank, _vblank;
 wire memoryOverlayOn, selectSCSI, selectSCC, selectIWM, selectVIA, selectRAM, selectROM, selectSEOverlay, selectHardwareRegs;
 wire [15:0] dataControllerDataOut;
 wire hw_turbo_en, hw_turbo_ovr, hw_cache_en;
+wire [1:0] hw_fillph_turbo; // turbo fill phase = 4 + value (00->4 .. 11->7)
+assign hw_turbo_en_o  = hw_turbo_en;
+assign hw_turbo_ovr_o = hw_turbo_ovr;
 
 // audio
 wire snd_alt;
@@ -378,16 +387,49 @@ assign mac_probes = {
 // cacheable: OSD or CSR enable, ROM/RAM only, overlay off
 wire        cache_cacheable = (configCache || hw_cache_en) && (selectROM || selectRAM) && !memoryOverlayOn;
 
-// CPU RAM write pulse: 1-cycle at Phase 2 of any RAM write → invalidate line
-wire        cache_wr_pulse  = !_cpuRW && selectRAM && !_cpuAS && (busPhase == 3'd2);
+// CPU RAM write pulse: /AS-assert edge of a cacheable RAM write -> invalidate
+// the line. Edge-based so it fires exactly once per write in BOTH stock and
+// turbo (the old phase-2 pulse was missed in ~half of turbo cycles).
+reg _cpuAS_d = 1'b1;
+always @(posedge clk_sys) _cpuAS_d <= _cpuAS;
+wire as_rise = !_cpuAS && _cpuAS_d;
+wire        cache_wr_evt   = as_rise && !_cpuRW && selectRAM;
+wire        cache_wr_pulse = cache_wr_evt;
 
 wire        cache_hit;
 wire [15:0] cache_data;
 assign      cache_data_dbg = cache_data;
 assign      cpu_data_in_dbg = dataControllerDataOut; // iEdb: what the 68k latches
 
+// Invalidate-all sweep: at power-on (BRAM contents are random on the FPGA,
+// a stale valid+tag could alias a live address) and whenever the cache is
+// enabled at runtime (cleared-by-reset hw regs could alias stale lines).
+// 1024 posedge cycles to sweep the whole tag array.
+reg [10:0] cache_inv_cnt = 11'd0;
+reg        reset_hi_d = 1'b0;
+reg        cache_en_d = 1'b0;
+wire       cache_en_cfg = configCache || hw_cache_en;
+always @(posedge clk_sys) begin
+    reset_hi_d <= _cpuReset;
+    cache_en_d <= cache_en_cfg;
+end
+wire cache_inv_start = _cpuReset && ((_cpuReset && !reset_hi_d) || (cache_en_cfg && !cache_en_d));
+always @(posedge clk_sys or negedge _cpuReset) begin
+    if (!_cpuReset)
+        cache_inv_cnt <= 11'd0;
+    else if (cache_inv_start)
+        cache_inv_cnt <= 11'd1;
+    else if (cache_inv_cnt != 11'd0 && cache_inv_cnt < 11'd1024)
+        cache_inv_cnt <= cache_inv_cnt + 11'd1;
+    else if (cache_inv_cnt == 11'd1024)
+        cache_inv_cnt <= 11'd0;
+end
+wire cache_invalidate_all = (cache_inv_cnt != 11'd0); // high for cnt=1..1024 (1024 lines)
+
 bram_cache cache0 (
     .clk_sys      ( clk_sys           ),
+    .reset_n      ( _cpuReset         ),
+    .invalidate_all ( cache_invalidate_all ),
     .cpu_addr     ( cpuAddr           ),
     .cacheable    ( cache_cacheable   ),
     .rom_req      ( rom_req           ),
@@ -418,50 +460,79 @@ wire _cpuDTACK_int = ~((!_cpuAS && ram_req && ram_done) ||
 assign _cpuDTACK = _cpuDTACK_int;
 
 // ---------------------------------------------------------------------------
-// Cache miss fill + hit/miss/fill statistics
+// Cache miss fill + hit/miss/fill statistics  (E-cycle based / phase-agnostic)
 // ---------------------------------------------------------------------------
 // NOTE: fx68k.eRWn is /RW (active LOW): _cpuRW==1 means READ, ==0 means WRITE.
-// Fills must be generated on READ misses. (The original detector used
-// !_cpuRW, i.e. it "filled" on RAM writes -- storing the stale read-data
-// register doutD into the just-invalidated line, corrupting read-backs.)
 //
-// Miss detection: the 68000 deasserts /AS a few CPU cycles after it samples
-// DTACK; in turbo that can happen before the next clk_sys posedge, so req_rst
-// asynchronously clears ram_req/rom_req. Therefore the miss is latched at
-// posedge 3->4 (cache_hit is valid from phase 3; /AS is still low in both
-// modes for a miss).
-//
-// Fill phase (validated in Verilator, see sim/nanomac_tb.cpp cache oracle):
-//   the SDRAM controller issues the read on phase 2 and the data is valid
-//   from mid-cycle onward -- the fill samples sdram_do on the selected phase.
-// `FILLPH = phase during which the fill pulse/data are issued (default 6).
+// In turbo mode the CPU E-cycle (2.5 busPhase grid slots) is NOT aligned to
+// any fixed phase (the 15.667MHz phase grid and the 39.168MHz E-cycles are
+// phase-locked 5:2), so fixed-phase latches (req@2, miss@3, fill@6, count@7)
+// misfire. Everything below is keyed on level/edge events instead:
+//   * RAM fill   : sdram_rd_done (the SDRAM FSM's own data-valid pulse) with
+//                  an address match to the in-flight miss. In stock mode this
+//                  is phase 6 (the old FILLPH=6) -- behavior unchanged.
+//   * ROM fill   : rising edge of the miss-DTACK condition, i.e. the exact
+//                  moment the 68k latches romDataMod.
+//   * write-invalidate : /AS-assert edge of a cacheable RAM write.
+//   * counters   : 0->1 edges of the hit / miss level conditions.
 // ---------------------------------------------------------------------------
-`ifndef FILLPH
-`define FILLPH 6
-`endif
+wire cacheable_rd = cache_cacheable && !_cpuAS && _cpuRW && (ram_req || rom_req);
 
-wire miss_evt_p3 = (busPhase == 3'd3) && !_cpuAS && _cpuRW &&
-                   (ram_req || rom_req) && !cache_hit && cache_cacheable;
-
-reg [23:1] fill_addr;
-reg        fill_is_rom;
-reg        miss_latched;
-always @(posedge clk_sys) begin
-    if (busPhase == 3'd3) begin
-        miss_latched <= miss_evt_p3;
-        fill_addr    <= cpuAddr;
-        fill_is_rom  <= rom_req;
-    end else if (busPhase == 3'd7) begin
-        miss_latched <= 1'b0; // safety: never carry a fill past cycle end
-    end
+// Miss tracking: valid from the first grid cycle of a cacheable read until
+// the next cycle starts (/AS re-assert) or a write to the same word lands
+// (write-through invalidation supersedes the pending fill).
+reg        miss_pending;
+reg [23:1] miss_addr;
+always @(posedge clk_sys or negedge _cpuReset or posedge _cpuAS) begin
+    if (!_cpuReset)
+        miss_pending <= 1'b0;
+    else if (_cpuAS)                 // new cycle starts: previous is over
+        miss_pending <= 1'b0;
+    else if (cacheable_rd && !cache_hit &&
+             !(cache_wr_evt && (miss_addr == cpuAddr)))
+        miss_pending <= 1'b1;
 end
+always @(posedge clk_sys or negedge _cpuReset) begin
+    if (!_cpuReset)
+        miss_addr <= 23'b0;
+    else if (cacheable_rd && !cache_hit)
+        miss_addr <= cpuAddr;
+end
+
+// --- RAM fill: sdram_rd_done is the SDRAM FSM's read-data-valid pulse (clk_sys
+// domain). The FSM read the word identified by sdram_rd_addr (21-bit CPU
+// word address = cpuAddr[21:1], de-mapped at the instantiation); fill that
+// line if it matches the in-flight miss (1-word lines: line == word address).
+wire ram_fill_evt = sdram_rd_done && miss_pending &&
+                    (sdram_rd_addr == miss_addr[21:1]);
+
+// --- ROM fill: rising edge of the ROM miss-DTACK condition. At that edge
+// the 68k latches romDataMod and /AS is still low (cpuAddr stable).
+wire rom_miss_dtack = cacheable_rd && rom_req && rom_done && !cache_hit;
+reg        rom_md_prev = 1'b0;
+always @(posedge clk_sys or negedge _cpuReset) begin
+    if (!_cpuReset)
+        rom_md_prev <= 1'b0;
+    else
+        rom_md_prev <= rom_miss_dtack;
+end
+wire rom_fill_evt = rom_miss_dtack && !rom_md_prev;
 
 reg        cache_fill_pulse;
 reg [15:0] cache_fill_data;
+reg [23:1] fill_addr;
+reg        fill_is_rom;
 always @(posedge clk_sys) begin
-    if (miss_latched && (busPhase == 3'd`FILLPH)) begin
+    if (ram_fill_evt) begin
         cache_fill_pulse <= 1'b1;
-        cache_fill_data  <= fill_is_rom ? romDataMod : sdram_do;
+        cache_fill_data  <= sdram_do;      // == rd data, rd_addr matched
+        fill_addr        <= {2'b0, sdram_rd_addr}; // 21-bit CPU word addr -> [23:1]
+        fill_is_rom      <= 1'b0;
+    end else if (rom_fill_evt) begin
+        cache_fill_pulse <= 1'b1;
+        cache_fill_data  <= romDataMod;    // word the CPU latches
+        fill_addr        <= cpuAddr;
+        fill_is_rom      <= 1'b1;
     end else begin
         cache_fill_pulse <= 1'b0;
     end
@@ -479,26 +550,22 @@ end
 assign last_fill_addr   = last_fill_addr_r;
 assign last_fill_is_rom = last_fill_is_rom_r;
 
-// Per-cycle hit/miss classification, fully in the clk_sys domain so it is
-// immune to the asynchronous /AS deassert. The cycle type is latched at
-// posedge 2->3 (when /AS is still low and the requests are set), the hit is
-// evaluated at posedge 3->4 (cache_hit valid from phase 3), and the counters
-// are advanced at cycle end (posedge 7->0).
-reg [3:0] cyc_type_r; // {active, is_read, is_rom, is_ram}
-always @(posedge clk_sys) begin
-    if (busPhase == 3'd2)
-        cyc_type_r <= { !_cpuAS, _cpuRW, rom_req, ram_req }; // _cpuRW==1 => read (/RW active low)
-end
-
-wire cyc_mem_rd = cyc_type_r[3] && cyc_type_r[2] && (cyc_type_r[0] | cyc_type_r[1]);
-reg  cyc_hit_flag;
-reg  cyc_miss_flag;
-always @(posedge clk_sys) begin
-    if (busPhase == 3'd3) begin
-        cyc_hit_flag  <= cyc_mem_rd && cache_hit;
-        cyc_miss_flag <= cyc_mem_rd && !cache_hit;
+// Hit / miss counters: 0->1 edges of the level conditions (one count per
+// cycle, since both conditions are low outside a cycle).
+wire cyc_hit_cnd  = cacheable_rd &&  cache_hit;
+wire cyc_miss_cnd = cacheable_rd && !cache_hit;
+reg  hit_prev = 1'b0, miss_prev = 1'b0;
+always @(posedge clk_sys or negedge _cpuReset) begin
+    if (!_cpuReset) begin
+        hit_prev  <= 1'b0;
+        miss_prev <= 1'b0;
+    end else begin
+        hit_prev  <= cyc_hit_cnd;
+        miss_prev <= cyc_miss_cnd;
     end
 end
+wire hit_evt  = cyc_hit_cnd  && !hit_prev;
+wire miss_evt = cyc_miss_cnd && !miss_prev;
 
 // Saturating counters (outputs driven by *_r registers).
 // Cleared by writing 0x55xx to $F80010 (the hits slot, idx 4).
@@ -518,10 +585,10 @@ always @(posedge clk_sys or negedge _cpuReset) begin
     if (!_cpuReset || cache_clr) begin
         cache_hits_r   <= 16'd0;
         cache_misses_r <= 16'd0;
-    end else if (busPhase == 3'd7) begin
-        if (cyc_hit_flag  && (cache_hits_r   != 16'hFFFF))
+    end else begin
+        if (hit_evt  && (cache_hits_r   != 16'hFFFF))
             cache_hits_r   <= cache_hits_r   + 1'b1;
-        if (cyc_miss_flag && (cache_misses_r != 16'hFFFF))
+        if (miss_evt && (cache_misses_r != 16'hFFFF))
             cache_misses_r <= cache_misses_r + 1'b1;
     end
 end
@@ -660,6 +727,7 @@ dataController #(SCSI_DEVS) dc0
 	.hw_turbo_en(hw_turbo_en),
 	.hw_turbo_ovr(hw_turbo_ovr),
 	.hw_cache_en(hw_cache_en),
+	.hw_fillph_turbo(hw_fillph_turbo),
 	.cache_hits(cache_hits),
 	.cache_misses(cache_misses),
 	.cache_fills(cache_fills),

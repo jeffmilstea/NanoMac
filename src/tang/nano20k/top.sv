@@ -121,12 +121,18 @@ wire       _cpuAS_probe;
 // Wait for CPU address strobe negated (_cpuAS_probe == 1) and end-of-cycle (phase == 7)
 // before changing clock or CPU turbo configuration.
 wire cpu_bus_idle = _cpuAS_probe && (phase == 3'd7);
+// ICE poke can override the OSD turbo setting (hw_turbo_ovr from $F80008).
+// Note: the poke bits are 2 phase-cycles behind the DCS register they drive
+// (dataController lags macplus one posedge, macplus lags top another) -- the
+// DCS switches exactly one E-cycle later, still on a bus-idle boundary.
+wire hw_turbo_ovr_top, hw_turbo_en_top;
+wire [1:0] turbo_eff = hw_turbo_ovr_top ? {2{hw_turbo_en_top}} : osd_turbo;
 reg [1:0] turbo_synced = 2'b00;
 always @(posedge clk_pixel or negedge hdmi_pll_lock) begin
     if (!hdmi_pll_lock || cpu_reset)
         turbo_synced <= 2'b00;
     else if (cpu_bus_idle)
-        turbo_synced <= osd_turbo;
+        turbo_synced <= turbo_eff;
 end
 
 // Dynamic clock selector: Stock = clk_pixel (15.6672 MHz), Turbo = clk_cpu_raw (39.168 MHz)
@@ -250,6 +256,10 @@ mcu_spi mcu (
 // On-Chip ILA & ICE Debugger Core
 // -----------------------------------------------------------------------------
 wire [47:0] mac_probes;
+// ICE poke/peek + hw turbo override (clk_pixel domain, same as clk_sys)
+wire        ice_poke_valid, ice_peek_req;
+wire [2:0]  ice_poke_idx, ice_peek_idx;
+wire [15:0] ice_poke_data, ice_peek_data;
 wire        cache_hit_probe;
 wire        cache_en_probe;
 wire        enPhi1_raw, enPhi2_raw;
@@ -282,7 +292,13 @@ ila ila_inst (
     .din                ( mcu_data_out       ),
     .dout               ( ila_data_out       ),
     .uart_rx            ( uart_rx            ),
-    .uart_tx            ( uart_tx            )
+    .uart_tx            ( uart_tx            ),
+    .ice_poke_valid     ( ice_poke_valid     ),
+    .ice_poke_idx       ( ice_poke_idx       ),
+    .ice_poke_data      ( ice_poke_data      ),
+    .ice_peek_req       ( ice_peek_req       ),
+    .ice_peek_idx       ( ice_peek_idx       ),
+    .ice_peek_data      ( ice_peek_data      )
 );
 
 // decode SPI/MCU data received for human input devices (HID) and
@@ -455,9 +471,13 @@ osd_u8g2  #(.H_OFFSET(86)) osd_u8g2 (
 
 /* -------------------- Tang Nano 20k SDRAM -------------------- */
 wire [15:0] sdram_dout;
-wire [15:0] sdram_din;   
-wire		sdram_oe;   
+wire [15:0] sdram_din;
+wire		sdram_oe;
 wire		sdram_we;
+wire		sdram_rd_done;
+wire [21:0] sdram_rd_addr_m; // SDRAM FSM mapped read address (22-bit)
+// de-map to CPU word address (inverse of .addr({1'b0,ram_addr[20:2],ram_addr[1:0]^osd_memory}))
+wire [20:0] sdram_rd_addr = { sdram_rd_addr_m[20:2], sdram_rd_addr_m[1:0] ^ osd_memory };
 wire [1:0]  sdram_ds;
 wire [20:0] ram_addr;
 
@@ -516,7 +536,9 @@ sdram sdram (
              .addr({1'b0, ram_addr[20:2], ram_addr[1:0] ^ osd_memory}), // 22 bit word address
              .ds(~sdram_ds),          // upper/lower data strobe, active low
              .oe(sdram_oe),           // cpu/chipset requests read/wrie
-             .we(sdram_we)            // cpu/chipset requests write
+             .we(sdram_we),           // cpu/chipset requests write
+             .rd_done(sdram_rd_done),
+             .rd_addr(sdram_rd_addr_m)
 );
    
 /* -------------------- Tang Nano spi flash -------------------- */
@@ -644,6 +666,8 @@ macplus macplus (
     .sdram_we(sdram_we),
     .sdram_oe(sdram_oe),
     .sdram_do(sdram_dout),
+    .sdram_rd_done(sdram_rd_done),
+    .sdram_rd_addr(sdram_rd_addr),
 
     .UART_CTS( 1'b1 ),
 	.UART_RTS(),
@@ -659,7 +683,15 @@ macplus macplus (
     .enPhi2_raw( enPhi2_raw ),
     .enPhi1_gated( enPhi1_gated ),
     .enPhi2_gated( enPhi2_gated ),
-    .cpu_reset_override( cpu_reset_override )
+    .cpu_reset_override( cpu_reset_override ),
+    .hw_turbo_en_o( hw_turbo_en_top ),
+    .hw_turbo_ovr_o( hw_turbo_ovr_top ),
+    .ice_poke_valid( ice_poke_valid ),
+    .ice_poke_idx( ice_poke_idx ),
+    .ice_poke_data( ice_poke_data ),
+    .ice_peek_req( ice_peek_req ),
+    .ice_peek_idx( ice_peek_idx ),
+    .ice_peek_data( ice_peek_data )
 );
 
 wire [5:0] leds;

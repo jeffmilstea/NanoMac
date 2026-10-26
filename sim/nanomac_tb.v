@@ -82,6 +82,10 @@ module nanomac_tb
 
 wire		    ram_ready;
 wire [15:0]	    sdram_dout;
+wire		    sdram_rd_done;
+wire [21:0]	    sdram_rd_addr_m; // SDRAM FSM mapped read address (22-bit)
+// tb uses identity addr mapping ({1'b0,ram_addr}), so CPU word addr = rd_addr[21:1]
+wire [20:0]	    sdram_rd_addr = sdram_rd_addr_m[21:1];
 wire		    enPhi1_raw, enPhi2_raw;
    
 sdram sdram (
@@ -105,11 +109,13 @@ sdram sdram (
              .phase(phase),           // bus cycle phase to sync to
              .din(sdram_din),         // data input from chipset/cpu
              .dout(sdram_dout),       // data output to chipset/cpu
+             .rd_done(sdram_rd_done),
+             .rd_addr(sdram_rd_addr_m),
              .addr({1'b0, ram_addr}), // 22 bit word address
              .ds(~sdram_ds),          // upper/lower data strobe
              .oe(sdram_oe),           // cpu/chipset requests read/wrie
              .we(sdram_we)            // cpu/chipset requests write
-);   
+);
 
 // for floppy IO the SD card itself may be included into the simulation or not
 wire [7:0]       sdc_rd;
@@ -227,6 +233,8 @@ macplus macplus (
 	.sdram_we(sdram_we),
 	.sdram_oe(sdram_oe),
 	.sdram_do(sdram_dout), // sdram_do (sim sram), sdram_dout = (sim sdram)
+	.sdram_rd_done(sdram_rd_done),
+	.sdram_rd_addr(sdram_rd_addr),
 
 	       // ILA/ICE: no ila in sim. Bypass the clock gating (raw phis back)
 	       // and leave the poke interface unconnected.

@@ -1,0 +1,31 @@
+{
+    "version": "2.0.0",
+    "tasks": [
+        {
+            "label": "Live Preview: Digitizer (macOS)",
+            "type": "shell",
+            // 1. ffmpeg captures raw video (-pixel_format uyvy422) with audio disabled (:none) to prevent device conflicts.
+            // 2. Streamed over a local UDP network loopback to bypass macOS window sandboxing issues.
+            // 3. mpv reads the stream, fits it to a 1/4 screen box, and pins it (--ontop) so it doesn't drop behind VS Code.
+            // 4. >/dev/null 2>&1 discards noisy 0x0 initialization packets before the stream fully syncs.
+            "command": "ffmpeg -y -loglevel error -f avfoundation -pixel_format uyvy422 -framerate 60 -i \"USB3 Video:none\" -an -f mpegts \"udp://127.0.0.1:12345\" & sleep 0.5 && mpv \"udp://127.0.0.1:12345\" --audio-device=\"avfoundation/USB3 Video\" --profile=low-latency --autofit=480x270 --title=\"Digitizer Preview\" --ontop --mute=yes >/dev/null 2>&1; kill $!",
+            "problemMatcher": [],
+            "presentation": {
+                "reveal": "always",
+                "panel": "new"
+            }
+        },
+        {
+            "label": "Live Preview: Digitizer (Linux)",
+            "type": "shell",
+            // 1. Linux automatically finds the dynamic device index (e.g., /dev/video0) matching "USB3 Video" using v4l2-ctl.
+            // 2. Same low-latency floating window parameters apply natively without desktop server crashes.
+            "command": "ffmpeg -y -loglevel error -f v4l2 -input_format mjpeg -i $(v4l2-ctl --list-devices | grep -A 1 \"USB3 Video\" | tail -n 1 | xargs) -an -f mpegts \"udp://127.0.0.1:12345\" & sleep 0.5 && mpv \"udp://127.0.0.1:12345\" --audio-device=\"alsa/default\" --profile=low-latency --autofit=480x270 --title=\"Digitizer Preview\" --ontop --mute=yes >/dev/null 2>&1; kill $!",
+            "problemMatcher": [],
+            "presentation": {
+                "reveal": "always",
+                "panel": "new"
+            }
+        }
+    ]
+}

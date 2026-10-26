@@ -136,6 +136,6 @@ Iterations = 1
 
 Speedometer 4.02 Benchmark Mix - Sieve test:
 Iterations = 1
-  Abs = 1791.790, Rat = 0.016 = 7.8Mhz
+  Abs = 1791.790, Rat = 0.016 = 7.8Mhz       <---- ~3x previous!
 
 ========================
