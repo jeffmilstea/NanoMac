@@ -201,6 +201,94 @@ B2) fill tag from fill_addr latched at ph3 which in turbo can be the
   (E-phase, iEdb, fill_pulse, invalidate, tag of 00016A).
 - Machine needs recovery via ICE reset or power cycle.
 
+
+## E-CYCLE RERWORK + COLD-BOOT FIX (build 996f7f8, flashed 2026-10-27 00:44 UTC)
+
+### Commits
+- 80d23cf: phase-agnostic (E-cycle based) fill/miss/counter logic
+  (sdram rd_done fill, ROM miss-DTACK edge fill, /AS-edge invalidate,
+  edge counters, power-on tag sweep, rd_addr demap at top/tb)
+- 996f7f8: cold-boot sweep gate (cache_cacheable &= !cache_in_sweep),
+  write-invalidate address fix (fires on written cycle, not /AS edge
+  where cpuAddr still = previous cycle), ICE 'c' counter-clear command
+
+### Board result of 80d23cf build (before 996f7f8)
+- Warm poke 55 (turbo+cache): machine runs (no freeze!). Counters all
+  FFFF = saturation (16-bit at 19.6MHz counts out in <1s; normal).
+- Sieve turbo+cache: 596ms @19.584MHz = 11.7M cycles/iter vs
+  stock+cache 1791ms @7.833MHz = 14.0M cycles/iter -> CYCLES DROPPED,
+  cache IS working in turbo (don't compare Abs across clock speeds).
+- OSD Turbo ON + Cache ON from COLD BOOT: stripey bars (ROM crash) -
+  reproduced; warm poke-enable never crashed (BRAM held valid lines,
+  not power-on garbage) -> root cause: sweep window race (boot ROM
+  reads a half-swept random tag that aliases a live address).
+  Fixed in 996f7f8 by gating cache_cacheable during the sweep.
+
+### NEW test procedure for 996f7f8 (keyboard-less)
+1. Power-cycle; set OSD: Turbo ON + Cache ON (keyboard needed once,
+   or: poke 55 after a good boot to enable cache in turbo and
+   separately verify stock+cache cold boot via OSD cache).
+   ACTUALLY simplest: OSD Cache ON + Turbo ON, power cycle, watch.
+2. COLD BOOT with Turbo+Cache should now reach desktop (no stripey bars).
+3. Counter windowing: `python3 scripts/nanomac_ice.py ... clear`
+   (new 'c' command), wait ~10-30s, `peek` -> meaningful
+   F80010/14/18 values.
+4. Benchmark: Speedometer 4.02 Dhrystone/Sieve/Compress at turbo+cache.
+   Compare CYCLES (ms * MHz) vs stock+cache (sieve 14.0M, dhrystone
+   552*2.51=1386ms-equiv... compute per-test).
+
+### ICE command set (scripts/nanomac_ice.py)
+state | halt | resume | reset | step | stepbus | arm | trigger |
+dump [--vcd f.vcd] | poke <lo> ($F80008: turbo_en|ovr<<1|cache<<2|fillph<<4)
+| peek (all 8 regs) | clear (stat counters) | interactive
+NEVER 'reset' after a poke you want to keep (clears hw control regs).
+
+### Poke control word table (lo byte, turbo_en+ovr+cache=0x03)
+fillph field is now RESERVED (fill is data-valid based):
+cache only: 3 | +turbo+ovr: 7 ... but 55 (0x37) is the full combo used
+before; fillph bits ignored by new RTL.
+
+
+## Sad Mac 0200F8 + BISECTION (2026-10-27 01:00-02:45 UTC)
+
+### Board state after 996f7f8 flash (OSD Turbo+Cache cold boot)
+- Sad Mac 0200F8 = RAM test error code 8 (write->read-back mismatch),
+  CPU parked spinning at $082134 (RAM), /AS deasserted, DT deasserted,
+  ram_req=1 stuck for 32+ bus cycles, SDRAM data still toggling
+  (controller kept servicing the abandoned read).
+- peek: F80008:0030 (hw bits 0 - the Sad Mac spin runs before turbo
+  engages / TR:0 -> stock-speed crash), F80010:FFFF hits,
+  F80014:1D8C misses, F80018:1D8C fills (every miss filled exactly
+  once => fill logic healthy), F8001C:000E (last fill = vector page).
+- ILA VCD: /tmp/freeze.vcd (256 samples @10ns, 11 signals).
+- Conclusion: cache-on corrupts the ROM RAM test AT STOCK SPEED.
+  80d23cf alone (no wr-invalidate change) did NOT show this (warm
+  poke 55 ran fine; cold-boot test at the time hit stripey bars, a
+  different ROM-later crash).
+
+### Verdict on 996f7f8's write-invalidate "fix"
+REVERTED (in working tree, bisect build in progress). At busPhase==2
+/cpuAS is already asserted, so cpuAddr holds the WRITE address - the
+old phase-2 pulse (631431f, proven on board) was CORRECT. My
+registered (sdram_we && ram_req) variant fires 1 grid cycle later; a
+63.8ns grid cycle is much shorter than a 204ns+ request, so by the
+next posedge /AS may already be deasserted and cpuAddr = NEXT cycle's
+address -> wrong line invalidated, written line left stale ->
+read-back mismatch -> 0200F8.
+KNOWN remaining gap (turbo-only): phase-2 gate misses writes whose
+request doesn't overlap grid phase 2 (5:2 grid -> ~half of turbo
+writes). Revisit after stock is green with a request-latched
+(latch cpuAddr on phase-2 AND, invalidate from the latched value).
+
+### Bisect plan (board tests, keyboard-free)
+build A (this): sweep gate + E-cycle fill + PHASE-2 wr-invalidate +
+  counter clear. Tests: (1) OSD Cache ON + Turbo OFF cold boot
+  [must reach desktop], (2) poke 55 warm turbo+cache [must run],
+  (3) clear/peek counter window, (4) Speedometer turbo+cache.
+if A fails (1): revert sweep gate too (build B) to isolate.
+if A passes (1) but fails (2): turbo wr-invalidate gap is confirmed
+  -> implement request-latched invalidate.
+
 ## Clocks/phase reference (stock mode)
 clk_sys=clk_pixel=15.6672MHz; 8 phases per E-cycle; /AS low from phase 2;
 ram_req/rom_req set at phase 2; cache_hit valid from phase 3; DTACK: hit@3,

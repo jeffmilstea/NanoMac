@@ -395,18 +395,17 @@ wire        cache_cacheable = (configCache || hw_cache_en) && (selectROM || sele
                               !memoryOverlayOn && !cache_in_sweep;
 
 // CPU RAM write invalidate -> invalidate the line just written.
-// CRITICAL: must NOT fire on the /AS edge (cpuAddr still holds the PREVIOUS
-// cycle's address there). It fires one posedge after sdram_we && ram_req
-// are set (the cycle the write address is on the bus / latched).
-reg wr_inv_evt = 1'b0;
-always @(posedge clk_sys) begin
-    if (!_cpuReset)
-        wr_inv_evt <= 1'b0;
-    else
-        wr_inv_evt <= sdram_we && ram_req;
-end
-wire        cache_wr_evt   = wr_inv_evt;
-wire        cache_wr_pulse = wr_inv_evt;
+// Phase-2 gated pulse (the form proven on the board at 631431f): at
+// busPhase==2, _cpuAS is already asserted so cpuAddr holds the write
+// address (stable through the whole request). The 996f7f8 "delayed"
+// variant (posedge after sdram_we&&ram_req) proved wrong on the board
+// (RAM test failure 0200F8): on a 63.8ns grid cycle a 204ns write request
+// straddles grid edges and the next posedge's cpuAddr can belong to an
+// already-terminated cycle. Known gap: this is phase-aligned, so in
+// turbo (~half the write requests don't overlap phase 2) it misses
+// invalidations - to be reworked once stock is green.
+wire        cache_wr_evt   = !_cpuRW && selectRAM && !_cpuAS && (busPhase == 3'd2);
+wire        cache_wr_pulse = cache_wr_evt;
 
 wire        cache_hit;
 wire [15:0] cache_data;
