@@ -289,6 +289,85 @@ if A fails (1): revert sweep gate too (build B) to isolate.
 if A passes (1) but fails (2): turbo wr-invalidate gap is confirmed
   -> implement request-latched invalidate.
 
+
+## SESSION END NOTE (2026-10-27 21:00 UTC) - HONEST STATUS, READ THIS FIRST
+
+### What is SOLVED / VERIFIED
+- Sim stock regression clean (5865 oracle flags = known tb artifact,
+  identical to cache-off baseline).
+- Commit 6f79470 boots clean on the board: stock+cache cold boot
+  (user-confirmed after flash), warm poke-55 turbo+cache (runs, no
+  freeze), OSD turbo on/off both work.
+- No Sieve regression: 3-iter Abs 596.871 (Oct23) vs 596.993 (Oct27,
+  current build, cache ON, stock) = 0.02%. The "1791.8" figure is
+  Speedometer's 1-iteration Abs (= 3x the 3-iteration Abs). User's
+  Oct25 "~3x previous!" note was the same artifact.
+- Cache counters saturate (FFFF) - high hit rate confirmed; `clear`
+  ICE command works ("[Cache counters cleared]").
+
+### What is NOT SOLVED (open, fresh bug)
+OSD Turbo OFF + Cache ON (set in OSD, saved, power cycle) -> machine
+FREEZES immediately, reboot -> stripey bars. Captured frozen state:
+- peek: F80008:0030 (hw override bits all 0, fillph default, turbo RO
+  bit 0) => NO poke was involved; this is the pure OSD config path.
+- CPU spinning at $08011A-$080120 reading 0xCC33 pattern, write to
+  $003E38 => ROM RAM-test / error region spin (same class as the
+  0200F8 and FF8CFC spins).
+- ILA C$EN (cache_cacheable) = 0 in EVERY sample of the spin.
+  So during the spin either (a) the spin addresses are not
+  selectRAM/selectROM (C$EN legitimately 0), or (b) configCache/osd_cache
+  is not reaching macplus. NOTE: C$EN=0 in a spin loop at $08xxxx
+  (RAM) would be a RED FLAG that configCache is 0.
+- sysctrl.v line 340: `if(id == "C") system_cache <= data_in[0];`
+  under CMD 4; top.sv: .system_cache(osd_cache) -> .configCache(osd_cache).
+  UNVERIFIED: whether the osd_cache reg in sysctrl is RESET-CLEARED and
+  whether the MCU actually persists+sends it on boot (OSD values are
+  MCU RAM/flash state - if not restored on FPGA boot, configCache=0
+  from power-up until the MCU re-sends it, i.e. cache is OFF during
+  the earliest boot = this exact crash signature).
+  ALSO UNVERIFIED: cache_en_cfg 0->1 edge triggers the 1024-line
+  invalidation sweep; if osd_cache rises MID-BOOT (when the MCU
+  re-sends it) the sweep + late-enable interacts with boot ROM in a
+  way that has never been tested (warm poke-55 tested it at desktop,
+  not during boot).
+- The previous-session claim "boots clean in all four mode combos"
+  was NEVER verified for OSD stock+cache cold boot. It fails.
+
+### Prime suspect for the OSD cold-boot crash
+osd_cache timing: configCache goes 0 during early boot (MCU not yet
+restored) then 1 mid-boot -> cache_in_sweep sweep fires mid-boot,
+OR the crash happens in the window BEFORE osd_cache rises, during
+which the ROM RAM test runs with cache OFF (fine) - so the crash
+may actually be the MCU not persisting 'C' at all and the user
+seeing a pre-existing stock crash... BUT user says stock-only boots
+clean, so configCache=1 must be doing something. Needs: (1) add
+configCache/osd_cache/sweep-active to the ILA probe bundle, (2)
+capture the FAILED cold boot from t=0 (arm before power-up is
+impossible; instead power cycle WITH dump buffer pre-armed and
+check first samples), or (3) simplest bisection: poke 4 (0x04 =
+cache_en only, no turbo) on a GOOD stock boot to enable cache via
+hw path and see if THAT also crashes (isolates OSD config path vs
+cache-enable-during-boot).
+
+### Rules for the next session (learned the hard way)
+1. NEVER claim a board state was "verified" unless the user
+   explicitly confirmed it in this session.
+2. Never import expectations (e.g. "turbo should be 2.5x in
+   Dhrystone") - ground every claim in manual_benchmarking.txt
+   data. Dhrystone has ALWAYS been ~569 in every mode, always.
+3. Speedometer Abs is NOT normalized across iteration counts:
+   1-iter Sieve Abs = 3x 3-iter Sieve Abs. Match iterations!
+4. The "19.6Mhz" label in Speedometer output is a mode flag, not a
+   measured frequency. Rat (0.016) is identical across modes.
+5. poke 6 (force turbo OFF mid-run) = instant lockup. Do not use.
+6. ICE `reset` clears hw_* regs. OSD config is a separate path.
+
+### Board state at session end
+Flash contains 6f79470 (rebuilt+reflashed 20:55 UTC). Board is in
+FAILED state (stock + OSD cache on, stripey bars on reboot).
+Recovery: set OSD Cache OFF (or just cache off + turbo off), power
+cycle -> boots clean.
+
 ## Clocks/phase reference (stock mode)
 clk_sys=clk_pixel=15.6672MHz; 8 phases per E-cycle; /AS low from phase 2;
 ram_req/rom_req set at phase 2; cache_hit valid from phase 3; DTACK: hit@3,

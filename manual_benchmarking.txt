@@ -150,3 +150,67 @@ Speedometer 4.02 Benchmark Mix - Sieve test:
 Iterations = 1
   Abs = 596.002, Rat = 0.002 = 19.6Mhz
 ========================
+Oct 26, bisecting
+cache = enabled via poke 55, Turbo = OFF
+
+Speedometer 4.02 Benchmark Mix - Dhrystone test:
+Iterations = 3
+  Abs = 569.917, Rat = 0.032 =  7.8Mhz
+
+Speedometer 4.02 Benchmark Mix - Sieve test:
+Iterations = 3
+  Abs = 1791.830, Rat = 0.016 = 7.8Mhz
+========================
+Oct 26, bisecting
+cache = enabled via poke 55, Turbo = ON
+
+Speedometer 4.02 Benchmark Mix - Dhrystone test:
+Iterations = 1
+  Abs = 569.901, Rat = 0.032 =  19.6Mhz
+
+Speedometer 4.02 Benchmark Mix - Sieve test:
+Iterations = 1
+  Abs = 1791.757, Rat = 0.016 = 19.6Mhz
+========================
+Oct 26, further bisecting
+
+Iterations = 1
+Turbo=ON, cache=ON (via poke 55)
+Dhrystone:  569.473, Rat: 0.032
+    Sieve: 1791.857, Rat: 0.000
+  Average:    0.016
+
+Iterations = 1
+Turbo=ON, cache=OFF (via poke 3)
+Dhrystone:  569.900, Rat: 0.032
+    Sieve: 1791.781, Rat: 0.000
+  Average:    0.016
+
+Iterations = 0
+Turbo=OFF, cache=ON (via poke 6)
+instant lockup after poke 6, distorted screen after reset
+
+========================
+Oct 26, "decisive test"
+
+Iterations = 1
+Turbo=OFF, cache=ON (via OSD)
+Dhrystone:  569.483, Rat: 0.032
+    Sieve: 1791.786, Rat: 0.000
+  Average:    0.016
+
+Iterations = 1
+Turbo=ON, cache=OFF (via OSD)
+Dhrystone:  569.468, Rat: 0.032
+    Sieve: 1791.855, Rat: 0.000
+  Average:    0.016
+
+========================
+Oct 27, bisecting the failure
+
+Iterations = 3
+Turbo=OFF, cache=ON (via OSD)
+Dhrystone:  561.758, Rat: 0.032
+    Sieve:  596.993, Rat: 0.002
+  Average:    0.017
+
