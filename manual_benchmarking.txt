@@ -139,3 +139,14 @@ Iterations = 1
   Abs = 1791.790, Rat = 0.016 = 7.8Mhz       <---- ~3x previous!
 
 ========================
+Oct 26, after cache purportedly working in turbo
+cache = enabled via poke 55, Turbo = ON
+
+Speedometer 4.02 Benchmark Mix - Dhrystone test:
+Iterations = 3
+  Abs = 552.250, Rat = 0.031 =  19.6Mhz
+
+Speedometer 4.02 Benchmark Mix - Sieve test:
+Iterations = 1
+  Abs = 596.002, Rat = 0.002 = 19.6Mhz
+========================

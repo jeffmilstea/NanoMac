@@ -406,6 +406,16 @@ module ila_uart #(
                                 poke_hi_rx <= 1'b0;
                                 state      <= S_PEEK_COLLECT;
                             end
+                            8'h43, 8'h63: begin // 'c'/'C' -> clear cache stat counters
+                                                // (1-cycle poke to idx 4, hi=0x55)
+                                ice_poke_valid <= 1'b1;
+                                ice_poke_idx   <= 3'd4;
+                                ice_poke_data  <= 16'h5500;
+                                msg_sel        <= 6;
+                                msg_idx        <= 0;
+                                msg_len        <= 27;
+                                state          <= S_PRINT_MSG;
+                            end
                             8'h51: begin // 'Q' -> Peek all 8 hw regs ($F80000-1C)
                                 peek_slot  <= 0;
                                 ice_peek_req <= 1'b1;
@@ -667,6 +677,39 @@ end
         18: fifo_din <= "]";
         19: fifo_din <= 8'h0D;
         20: fifo_din <= 8'h0A;
+        default: fifo_din <= 8'h0A;
+    endcase
+end
+// msg_sel 6 (len 27) "[Cache counters cleared]"
+6: begin
+    case (msg_idx)
+        0: fifo_din <= 8'h0D;
+        1: fifo_din <= 8'h0A;
+        2: fifo_din <= "[";
+        3: fifo_din <= "C";
+        4: fifo_din <= "a";
+        5: fifo_din <= "c";
+        6: fifo_din <= "h";
+        7: fifo_din <= "e";
+        8: fifo_din <= " ";
+        9: fifo_din <= "c";
+        10: fifo_din <= "o";
+        11: fifo_din <= "u";
+        12: fifo_din <= "n";
+        13: fifo_din <= "t";
+        14: fifo_din <= "e";
+        15: fifo_din <= "r";
+        16: fifo_din <= "s";
+        17: fifo_din <= " ";
+        18: fifo_din <= "c";
+        19: fifo_din <= "l";
+        20: fifo_din <= "e";
+        21: fifo_din <= "a";
+        22: fifo_din <= "r";
+        23: fifo_din <= "e";
+        24: fifo_din <= "d";
+        25: fifo_din <= "]";
+        26: fifo_din <= 8'h0D;
         default: fifo_din <= 8'h0A;
     endcase
 end

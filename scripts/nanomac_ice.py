@@ -282,7 +282,7 @@ def main():
     parser = argparse.ArgumentParser(description="NanoMac ILA & ICE Debugger")
     parser.add_argument("--port", help="Serial port (default: auto-detect)")
     parser.add_argument("--baud", type=int, default=2000000, help="Baud rate (default: 2000000)")
-    parser.add_argument("command", choices=["state", "halt", "resume", "reset", "step", "stepbus", "arm", "trigger", "dump", "interactive", "poke", "peek"])
+    parser.add_argument("command", choices=["state", "halt", "resume", "reset", "step", "stepbus", "arm", "trigger", "dump", "interactive", "poke", "peek", "clear"])
     parser.add_argument("count", nargs="?", type=int, default=1, help="Step count")
     parser.add_argument("--vcd", help="Save dump to VCD file for GTKWave")
 
@@ -317,6 +317,13 @@ def main():
         time.sleep(0.05)
         resp = ser.read(64).decode("utf-8", errors="replace").strip()
         print(f"[NanoMac ICE] Poked $F80008 lo=0x{lo:02X} (fillph phase={4 + ((lo >> 4) & 3)}) {resp}")
+    elif args.command == "clear":
+        # clear cache stat counters (hits/misses/fills)
+        ser.reset_input_buffer()
+        ser.write(b"C")
+        time.sleep(0.05)
+        resp = read_nonempty_line(ser)
+        print(f"[NanoMac ICE] {resp}")
     elif args.command == "peek":
         # read all 8 hw registers $F80000-$F8001C
         ser.reset_input_buffer()

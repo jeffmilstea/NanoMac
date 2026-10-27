@@ -385,16 +385,28 @@ assign mac_probes = {
 // -------------------------------------------------------------------------
 // cacheable: ROM and RAM only; disabled during memory overlay boot window
 // cacheable: OSD or CSR enable, ROM/RAM only, overlay off
-wire        cache_cacheable = (configCache || hw_cache_en) && (selectROM || selectRAM) && !memoryOverlayOn;
+// While the tag-invalidation sweep (declared below) runs the tag array is
+// being cleared, so the cache must not serve hits or accept fills: on cold
+// boot the FPGA BRAM starts with RANDOM contents, and a stale valid+tag in
+// a not-yet-swept line aliases a live address -> false hit -> the boot ROM
+// reads garbage in its first ~1024 grid cycles -> stripey-bars crash.
+wire cache_in_sweep = (cache_inv_cnt != 11'd0);
+wire        cache_cacheable = (configCache || hw_cache_en) && (selectROM || selectRAM) &&
+                              !memoryOverlayOn && !cache_in_sweep;
 
-// CPU RAM write pulse: /AS-assert edge of a cacheable RAM write -> invalidate
-// the line. Edge-based so it fires exactly once per write in BOTH stock and
-// turbo (the old phase-2 pulse was missed in ~half of turbo cycles).
-reg _cpuAS_d = 1'b1;
-always @(posedge clk_sys) _cpuAS_d <= _cpuAS;
-wire as_rise = !_cpuAS && _cpuAS_d;
-wire        cache_wr_evt   = as_rise && !_cpuRW && selectRAM;
-wire        cache_wr_pulse = cache_wr_evt;
+// CPU RAM write invalidate -> invalidate the line just written.
+// CRITICAL: must NOT fire on the /AS edge (cpuAddr still holds the PREVIOUS
+// cycle's address there). It fires one posedge after sdram_we && ram_req
+// are set (the cycle the write address is on the bus / latched).
+reg wr_inv_evt = 1'b0;
+always @(posedge clk_sys) begin
+    if (!_cpuReset)
+        wr_inv_evt <= 1'b0;
+    else
+        wr_inv_evt <= sdram_we && ram_req;
+end
+wire        cache_wr_evt   = wr_inv_evt;
+wire        cache_wr_pulse = wr_inv_evt;
 
 wire        cache_hit;
 wire [15:0] cache_data;
@@ -580,7 +592,8 @@ assign cache_fills  = cache_fills_r;
 // cpuAddr[23:1] has cpuAddr[3]=A4, cpuAddr[2]=A3, cpuAddr[1]=A2 (no A1/A0).
 wire cache_clr = selectHardwareRegs && !_cpuAS && !_cpuRW && !_cpuLDS &&
                  (cpuAddr[3]) && (cpuAddr[2:1] == 2'b00) &&
-                 (cpuDataOut[15:8] == 8'h55);
+                 (cpuDataOut[15:8] == 8'h55) ||
+                 (ice_poke_valid && (ice_poke_idx == 3'd4) && (ice_poke_data[15:8] == 8'h55));
 always @(posedge clk_sys or negedge _cpuReset) begin
     if (!_cpuReset || cache_clr) begin
         cache_hits_r   <= 16'd0;
