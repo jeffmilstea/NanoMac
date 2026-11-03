@@ -780,6 +780,128 @@ Mechanism (stock mode, single shared phase-2 SDRAM fetch):
    (trigset 3 0x000004 0xFFFFFF) to catch what the original exception
    was (the pre-hang window here only shows the handler tail).
 
+### OPTION A: BOARD RESULT (2026-11-03 evening) — CPU SIDE FIXED, VIDEO BROKEN
+- **Built + flashed (commits 9e4e250, 37317a0).** Board: booted fully to
+  desktop (NO hang; CPU/cache side works). But the DISPLAY IS SCRAMBLED:
+  full-screen ~50/50 black/white horizontal-tear noise (captured:
+  images/frame_optiona_scramble.png). Booted stock: Turbo=OFF, Cache=OFF,
+  no pokes at all.
+- **Diagnosis (HIGH confidence; unproven in RTL sim yet):**
+  `/AS` is ACTIVE-LOW, so `cpu_mem_acc = selectRAM && !_cpuAS`
+  (addrController.v:125) is 1 exactly while the 68k is IN an active
+  RAM access (AS low, address in the RAM window). At the desktop the
+  68k is in RAM accesses a LARGE fraction of the time: instruction
+  fetches (Finder is in RAM), memory-mapped video updates, blits.
+  Because of the 68k<->grid drift (~2.5:1, documented), a video
+  fetch tick (phase-2 tick in a videoBusControl window where
+  loadPixels=1) lands on an in-flight CPU RAM access ~50% of the
+  time. Under Option A each such collision makes the CPU win the
+  slot:
+  1. lpx=0 -> the video pixel word for that window is NEVER
+     fetched; the videoShifter (videoShifter.v:22) shifts blank
+     ({shiftRegister[14:0],1}) instead of loading the word;
+  2. videoTimer's videoAddr is combinational {ypos,xpos}
+     (videoTimer.v:62) - the counter does not wait for the fetch,
+     so the line DESYNCS by one word (16 px) at every dropped word
+     and everything after it is shifted/garbage;
+  3. with ~50% of words dropped, nearly every line tears ->
+     full-screen 50/50 noise = exactly the screenshot.
+  - THE WRONG ASSUMPTION: "a collision is a rare alignment event;
+    one dropped pixel word is invisible." At the desktop collisions
+    are the NORM (~1 per 2 video words), and each dropped word
+    tears the REST of the line, so they are very visible. The
+    original hang bug and this scramble are two faces of the same
+    coin: one shared phase-2 slot, two masters, and NEITHER side
+    may simply lose.
+  - Why sim never caught it: (gap 1) tb_ramwin's fake 68k is either
+    100% AS-low (first half: every tick classified CPU-expected, so
+    "CPU wins" is the expected verdict and the lost video words are
+    never counted) or 100% AS-high (second half: no collisions at
+    all) - it never models the ~50%-duty in-flight-access pattern
+    of the real desktop, and it checks rd_addr ownership only,
+    never the video word stream. (gap 2) the full-machine
+    nanomac_tb has NO pixel-stream oracle - video correctness is
+    not checked anywhere in sim. BOTH gaps.
+  - Why the desktop RAM test still passed in sim: sram-vs-sdram
+    cross-check only verifies CPU-side data.
+- **Suspect list (ranked):**
+  1. (above) cpu_mem_acc high while the 68k is in RAM accesses ->
+     constant video-word theft at the desktop.
+  2. audio path (lsnd gate) - far less likely: audio collides once
+     per hblank, would cause small artifacts, not full-screen noise.
+  3. HDMI/sync - ruled out by the boot text being normal and the
+     noise pattern (horizontal tearing consistent with dropped
+     16-bit words).
+- **KEY REALIZATION: Option A is INSUFFICIENT, not just buggy.**
+  The system has one phase-2 slot per E-cycle for CPU + video DMA
+  (~50% duty) + audio. Option A makes the CPU always win, which
+  fixes the CPU poison/hang BUT starves video on ~half its words at
+  the desktop -> the scramble. The fix that worked for the CPU
+  REQUIRES video to be lossless instead: a dropped video word must
+  be RE-ISSUED (video slows down / backfills), not dropped. So the
+  real fix = "CPU wins the slot; video/audio requests are QUEUED and
+  retried until serviced."
+- **FIX DIRECTION (next session; validate-in-sim-first per rule):**
+  (a) CPU-wins arbitration stays (cpu_mem_acc / cpu_slot parts), but
+      video/audio become non-dropping:
+      - Option A1 (small): in addrController, when lpx is suppressed
+        by cpu_mem_acc, set a `vpx_pending` flag; on the NEXT tick
+        where the CPU is not using the slot, lpx' = vpx_pending (the
+        same videoAddr word - videoAddr is combinational from
+        {ypos,xpos} so it still points at the dropped word; BUT the
+        xpos counter keeps running, so the word changes each tick!
+        -> the pending flag must ALSO freeze the video word: either
+        latch videoAddr at the dropped tick and serve the latched
+        word on the retry tick, or move the pixel word counter into
+        a registered "video fetch address" that advances ONLY when
+        the fetch is actually serviced (Option A2, cleaner: video
+        fetch address = registered counter advanced on lpx==1 at
+        phase 2; then a collision simply delays the counter - the
+        shifter receives words in order, just late; the line's
+        timing is carried by the shifter's 32.5MHz shift clock which
+        is already decoupled from the fetch grid via the 16-bit
+        shift register - one late word = one word of blank at the
+        tear point, NOT a full-line desync).
+        NEEDS CAREFUL DESIGN: verify the shifter tolerates a 1-E-
+        cycle (63.8ns) word gap without blanking/tearing (the shift
+        register just shifts 16 extra '1' bits = one black pixel-
+        pair window - likely invisible, MUST verify in sim).
+      - Option A2 (medium, preferred): the video fetch address
+        becomes a register that only increments when the SDRAM slot
+        is actually won by video (lpx==1 && phase==2 serviced).
+        videoTimer keeps {ypos,xpos} for timing; addrController
+        derives the fetch stream. This is the "video DMA paces
+        itself to slot availability" design.
+      - Option B (2-deep SDRAM request queue in sdram.v FSM) is the
+        heavier alternative; only if A2 proves messy.
+  (b) SIM FIRST - a pixel-stream oracle is mandatory before any
+      video RTL change:
+      - tb_ramwin.sv: add a third phase where the fake 68k does
+        50%-duty RAM reads (AS low ~400 ticks, high ~400 ticks,
+        looping, address cycling through RAM words) - the desktop
+        pattern - and assert: EVERY video word is eventually fetched
+        (count fetches per videoAddr word == 1, no word missing, no
+        duplicates) even though some arrive late.
+      - nanomac_tb: add a pixel-stream check (compare the word the
+        shifter loads on each lpx tick against the expected
+        framebuffer word from a known test pattern written at boot;
+        even counting loadPixels-to-sdram-fetch 1:1 would have
+        caught this bug).
+  (c) Board triage (cheap, do FIRST if board is free; it is up and
+      scrambled, stock, cache OFF, no pokes):
+      - `python3 scripts/nanomac_ice.py poke 8` (hw_video_off=1,
+        cache off): expect screen goes solid/blank (no noise) =
+        confirms corruption is in the video fetch path. `poke 0`:
+        noise returns.
+      - `poke 4` (cache on, video ON): does it still freeze 60-110s?
+        If NOT, the CPU-side half of Option A is confirmed good even
+        with broken video (the poison path is closed); record it.
+- **IMMEDIATE STATE:** board is BOOTED (working CPU, scrambled
+  display), stock Turbo=OFF Cache=OFF, no pokes. SPI flash =
+  commits 37317a0/9e4e250. Do NOT poke the cache on until the video
+  path is fixed (old freeze behavior may still be present underneath
+  - unknown, the scramble masks it).
+
 ### OPTION A IMPLEMENTED + SIM-VALIDATED (2026-11-03 session)
 - **Deterministic collision TB (sim/tb_ramwin.sv)**: real clocks +
   addrDecoder + videoTimer + addrController + board sdram.v FSM. Fake
@@ -1001,24 +1123,75 @@ ILA: clk_pixel, 256x64 trace, probe map v2 (see "Probe map v2" above;
 - Timing report violations are a red herring (SDC only constrains clk_osc).
 - context limit 262k; this handoff doc is the recovery point.
 
-## FRESH-SESSION PROMPT (paste as first message 2026-11-03+)
-Read HANDOFF.md esp. "OPTION A IMPLEMENTED + SIM-VALIDATED" and the
-2026-11-03 sections. State: Option A (CPU wins the phase-2 SDRAM slot)
-is implemented in the working tree and SIM-VALIDATED (sim/tb_ramwin.sv:
-unfixed=50/125 CPU fetches stolen -> fixed=0 mismatches; full-machine
-regression cache on/off bad=0; ILA hang TB all-PASS). NOT yet built/
-flashed. Board is still FROZEN from the poke-4 freeze of the previous
-session (flash #4 in SPI). Next: (1) FPGA build `cd src && bash
-build.sh` then `bash scripts/flash_board.sh src/impl/pnr/nanomac.fs -f`
-+ POWER CYCLE (recover: OSD Cache OFF, stock), (2) settled canary
-(trigset 4, arm, 30s, dump -> pos=0), (3) poke 4 -> expect NO freeze
-this time; if it freezes, dump --vcd (probe map v3 shows ram_req),
-(4) ICE 'R' + poke 12 (cache on, video DMA OFF via new hw_video_off
-bit3) -> 5+ min healthy = display-off confirmation (the corrected
-step 1: there is NO OSD video-off and unplugging HDMI does not stop
-the DMA - that's why hw_video_off exists), (5) optional Q1: trigset 3
-0x000004 0xFFFFFF for the first vector write, (6) if green:
-Speedometer 3-iter sieve vs 14.0M cycles/iter baseline + clear/peek
-counter window. See "RISK NOTES" in the OPTION A section before
-declaring victory (first-exception origin Q1 may be a separate bug;
-turbo not re-validated in sim this session).
+## FRESH-SESSION PROMPT (paste as first message 2026-11-04+)
+Read HANDOFF.md: (1) "OPTION A: BOARD RESULT (2026-11-03 evening) -
+CPU SIDE FIXED, VIDEO BROKEN" first, (2) then "OPTION A IMPLEMENTED +
+SIM-VALIDATED", (3) then the hang.vcd decode section above it.
+
+STATE: Option A (CPU wins the phase-2 SDRAM fetch slot) is built +
+flashed (commits 9e4e250, 37317a0, docs 0638d13). The CPU/hang side is
+FIXED on the board: full boot to desktop, no freeze at startup. But
+the DISPLAY IS SCRAMBLED (full-screen 50/50 black/white horizontal
+tear noise; screenshot images/frame_optiona_scramble.png) even in
+stock Turbo=OFF Cache=OFF with no pokes. Boot itself (text/RAM test)
+was fine - the corruption is in the video pixel pipeline.
+
+DIAGNOSIS (high confidence, NOT yet proven in sim): /AS is
+ACTIVE-LOW, so the Option-A gate `cpu_mem_acc = selectRAM && !_cpuAS`
+(addrController.v:125) is 1 exactly while the 68k is IN an active RAM
+access. At the desktop that's a LARGE fraction of the time (Finder
+instruction fetches in RAM + memory-mapped video updates). With the
+68k<->grid drift (~2.5:1), ~half of all video fetch ticks land on an
+in-flight CPU RAM access -> Option A makes the CPU win the slot ->
+the video word is DROPPED (lpx=0) and videoTimer's combinational
+videoAddr ({ypos,xpos}, videoTimer.v:62) advances anyway -> the
+shifter desyncs by one word at every drop, tearing the rest of the
+line. ~50% of words dropped = full-screen noise. KEY INSIGHT:
+Option A (CPU always wins) is INSUFFICIENT by itself - the video
+side must be made LOSSLESS (a suppressed word must be re-issued,
+not dropped), otherwise every CPU RAM access costs the display a
+tear. The original hang and this scramble are the same coin:
+one shared phase-2 slot, two masters, neither may simply lose.
+Sim gaps that hid it: tb_ramwin.sv's fake 68k is either 100%
+AS-low (all ticks CPU-expected; lost video words uncounted) or 100%
+AS-high (no collisions) - it never models the ~50%-duty desktop
+pattern - and nanomac_tb has NO pixel-stream oracle at all.
+
+NEXT (in order):
+1. Board triage first (board is up, scrambled, stock, cache off, NO
+   pokes): `python3 scripts/nanomac_ice.py poke 8` (hw_video_off=1)
+   -> screen should go solid/blank (no noise) = corruption is in the
+   video fetch path (expected). `poke 0` -> noise returns. Then
+   `poke 4` (cache on, video ON): if it STILL does not freeze after
+   minutes, the CPU-side half of Option A is confirmed good even
+   with broken video (poison path closed); record + peek.
+2. SIM FIRST - a pixel-stream oracle is mandatory before any video
+   RTL change:
+   (a) tb_ramwin.sv: add a third phase where the fake 68k does
+       50%-duty RAM reads (AS low ~400 ticks / high ~400 ticks,
+       address cycling through RAM words) = the desktop pattern, and
+       assert EVERY video word is eventually fetched exactly once
+       (none missing, none duplicated), even if some arrive late.
+   (b) nanomac_tb.cpp/.v: assert 1:1 between loadPixels ticks and
+       video SDRAM fetches (or compare loaded words against a known
+       framebuffer pattern) - this single check would have caught
+       the scramble.
+3. FIX (only after the sim reproduces the scramble): keep CPU-wins
+   arbitration, make video LOSSLESS - preferred Option A2: the
+   video fetch address becomes a REGISTERED counter that advances
+   only when the SDRAM slot is actually won by video (a collision
+   delays, never drops, the word; verify in sim that the shifter
+   tolerates the resulting 1-E-cycle word gap as one black pixel-
+   pair, not a line tear). Alternative A1: pending-flag + latched
+   videoAddr retry. Option B: 2-deep request queue in sdram.v FSM.
+   Do NOT ship any video change without (2) green.
+4. Only when stock video is clean again: redo the original board
+   sequence (settled canary, poke 4 cache-on -> no freeze, poke 12
+   display-off confirmation 5+ min, optional Q1 trigset 3 0x000004
+   0xFFFFFF first-vector-write), then Speedometer 3-iter sieve vs
+   14.0M cycles/iter baseline + clear/peek counter window.
+
+RULES (unchanged): validate-in-sim-first before building/flashing;
+hypothesize -> validate with evidence -> confirm with user before
+fixing; SPI flash (-f) for bitstreams; timing-report violations are a
+red herring (SDC only constrains clk_osc).
