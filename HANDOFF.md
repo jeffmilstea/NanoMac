@@ -830,6 +830,11 @@ Mechanism (stock mode, single shared phase-2 SDRAM fetch):
   - ./nanomac --cache 0 --fastboot 0: bad=0, healthy.
   - Standalone ILA hang TB (ila_hang_tb.sv) re-run after ila_uart
     edit: ALL PASS (healthy gaps abort, hang 61000 -> DONE pos=245).
+- **Gowin build fix (commit 37317a0):** gw_sh EX3828 rejects the
+  hierarchical ref `macplus.cache_en_cfg` (Verilator allows it).
+  Now a proper macplus output port `cache_en_cfg_probe`. Sim
+  regression re-checked clean. If further EX3828/hierarchical-ref
+  errors appear, same pattern: expose as a module output port.
 - **STILL TO DO (next session):**
   1. FPGA build: cd src && bash build.sh  (gw_sh; GIT_HASH fallback
      0xDEAD if -verilog_define warning persists - known, non-fatal).
