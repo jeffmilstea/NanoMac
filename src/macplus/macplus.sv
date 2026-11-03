@@ -101,6 +101,7 @@ module macplus
 	output		       osd_cache_probe,   // ILA: raw configCache from OSD/MCU
 	output		       cache_sweep_probe, // ILA: 1 while tag invalidation sweep runs
 	output		       hw_video_off_probe,// ILA: video/audio DMA disabled (poke bit3)
+	output		       cache_en_cfg_probe,// ILA: configCache || hw_cache_en
 	output [15:0]	       cache_data_dbg,  // debug/tb: word currently served by cache
 	output [15:0]	       cpu_data_in_dbg, // debug/tb: CPU data in (for oracle cross-check)
 	output [15:0]	       cache_hits,      // stat: cache hits since last clear
@@ -302,6 +303,7 @@ assign      cache_en_probe  = cache_cacheable;
 assign      osd_cache_probe   = configCache;
 assign      cache_sweep_probe = cache_in_sweep;
 assign      hw_video_off_probe = hw_video_off;
+assign      cache_en_cfg_probe = cache_en_cfg;
 
 // -------------------------------------------------------------------------
 // VIA 6522 E-Clock Strobe Synchronizer

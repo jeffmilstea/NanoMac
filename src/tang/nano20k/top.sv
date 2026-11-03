@@ -265,6 +265,7 @@ wire        cache_en_probe;
 wire        osd_cache_probe;      // raw configCache from OSD/MCU
 wire        cache_sweep_probe;    // tag invalidation sweep in progress
 wire        hw_video_off_probe;   // video/audio DMA off (poke $F80008 bit3)
+wire        cache_en_cfg_probe;   // configCache || hw_cache_en
 wire        enPhi1_raw, enPhi2_raw;
 wire        enPhi1_gated, enPhi2_gated;
 
@@ -280,7 +281,7 @@ wire        enPhi1_gated, enPhi2_gated;
 wire [63:0] ila_probes = {
     mac_probes[11],       // [63]    ram_req
     cache_sweep_probe,    // [62]    cache tag-invalidation sweep active
-    macplus.cache_en_cfg, // [61]    cache_en_cfg (configCache || hw_cache_en)
+    cache_en_cfg_probe,   // [61]    cache_en_cfg (configCache || hw_cache_en)
     hw_video_off_probe,   // [60]    video/audio DMA off
     4'd0,                 // [59:56] (was: sdram_dout data byte - sacrificed)
     mac_probes[47:24],    // [55:32] 24-bit cpuAddr
@@ -703,6 +704,7 @@ macplus macplus (
     .osd_cache_probe( osd_cache_probe ),
     .cache_sweep_probe( cache_sweep_probe ),
     .hw_video_off_probe( hw_video_off_probe ),
+    .cache_en_cfg_probe( cache_en_cfg_probe ),
     .enPhi1_raw( enPhi1_raw ),
     .enPhi2_raw( enPhi2_raw ),
     .enPhi1_gated( enPhi1_gated ),
