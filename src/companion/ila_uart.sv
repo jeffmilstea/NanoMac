@@ -13,7 +13,8 @@
       '1'        : Single-step 1 clock phase (and print state)
       '8'        : Single-step 8 clock phases (1 cycle) (and print state)
       'b'        : Single-step 1 bus cycle (and print state)
-      'a'        : Arm ILA trace buffer on _cpuAS falling edge
+      'a'        : Arm ILA trace buffer on the configured trigger (default _cpuAS)
+      't'        : Set trigger config: 't' + mode + 3 addr bytes + 3 mask bytes (applied on 'a')
       'A'        : Force trigger trace buffer immediately
       'd'        : Dump last 64 trace samples as formatted ASCII table
       'D'        : Dump all 512 trace samples as formatted ASCII table
@@ -58,6 +59,8 @@ module ila_uart #(
     output reg          uart_disarm_req,
     output reg          uart_force_trig_req,
     output reg [2:0]    uart_trig_mode,
+    output reg [23:0]   uart_trig_addr,
+    output reg [23:0]   uart_trig_mask,
 
     // Hardware register poke/peek (same clock domain as macplus)
     output reg          ice_poke_valid,
@@ -248,6 +251,7 @@ module ila_uart #(
     localparam S_PEEK_SET   = 4'd8;  // settle after ice_peek_req
     localparam S_PEEK_PRINT = 4'd9;  // print one register line
     localparam S_PEEK_COLLECT = 4'd10; // collect 2 bytes for poke
+    localparam S_CFG_COLLECT  = 4'd11; // collect 7 bytes for trigger config ('t')
 
     reg [3:0]  state;
     reg [7:0]  msg_idx;
@@ -259,6 +263,7 @@ module ila_uart #(
     reg [9:0]  dump_cnt;
     reg [5:0]  dump_col;
     reg [2:0]  bin_byte_idx;
+    reg        bin_hdr;
     // P/Q poke/peek support
     reg [2:0]  peek_slot;
     reg [1:0]  peek_settle;
@@ -269,6 +274,9 @@ module ila_uart #(
     reg        print_after_step;
     reg [63:0] sample_latch;
     reg [19:0] step_timeout;
+    // Trigger config collection ('t' command): 7 bytes after the 't'
+    reg        cfg_collect;
+    reg [2:0]  cfg_idx;
 
     always @(posedge clk) begin
         if (reset) begin
@@ -282,7 +290,9 @@ module ila_uart #(
             uart_arm_req        <= 0;
             uart_disarm_req     <= 0;
             uart_force_trig_req <= 0;
-            uart_trig_mode      <= 0;
+            uart_trig_mode      <= 3'd1; // default: trigger on _cpuAS low (as before 't' support)
+            uart_trig_addr      <= 24'h0001B0;
+            uart_trig_mask      <= 24'hFFFFFF;
             fifo_wr             <= 0;
             fifo_din            <= 0;
             msg_idx             <= 0;
@@ -292,8 +302,11 @@ module ila_uart #(
             dump_end            <= 0;
             dump_col            <= 0;
             trace_rd_addr       <= 0;
+            bin_hdr             <= 0;
             print_after_step    <= 0;
             step_timeout        <= 0;
+            cfg_collect         <= 0;
+            cfg_idx             <= 0;
         end else begin
             // Default strobes
             uart_halt_req       <= 0;
@@ -365,9 +378,9 @@ module ila_uart #(
                                 step_timeout      <= 20'd500000;
                                 state             <= S_WAIT_STEP;
                             end
-                            8'h61: begin // 'a' -> Arm ILA on _cpuAS
+                            8'h61: begin // 'a' -> Arm ILA on the configured trigger
+                                // (mode 1 = _cpuAS low by default; 't' overrides it)
                                 uart_arm_req   <= 1'b1;
-                                uart_trig_mode <= 3'd1; // Trigger on _cpuAS low
                                 msg_sel        <= 4;
                                 msg_idx        <= 0;
                                 msg_len        <= 22;
@@ -394,17 +407,32 @@ module ila_uart #(
                                 dump_col      <= 0;
                                 state         <= S_DUMP_HDR;
                             end
-                            8'h42: begin // 'B' -> Raw binary dump (4096 bytes)
+                            8'h42: begin // 'B' -> Raw binary dump: 1 trigger_pos byte + 4096 sample bytes
                                 dump_cur      <= 0;
                                 dump_cnt      <= 10'd512;
                                 trace_rd_addr <= 0;
                                 bin_byte_idx  <= 0;
+                                bin_hdr       <= 1'b1;
                                 state         <= S_DUMP_BIN;
                             end
-                            8'h50: begin // 'P' -> Poke $F80008 control word.
+                            8'h50: begin // 'P' -> Poke $F80008 control word (idx 2).
                                         // Next 2 RX bytes: data hi, data lo (hi must be 0x55)
                                 poke_hi_rx <= 1'b0;
+                                poke_cnt   <= 2'd0;
                                 state      <= S_PEEK_COLLECT;
+                            end
+                            8'h54: begin // 'T' -> Poke $F80004 identity word (idx 1).
+                                        // Next 2 RX bytes: data hi, data lo
+                                poke_hi_rx <= 1'b0;
+                                poke_cnt   <= 2'd1;
+                                state      <= S_PEEK_COLLECT;
+                            end
+                            8'h74: begin // 't' -> trigger config: 7 bytes follow:
+                                        // mode, addr[23:16], addr[15:8], addr[7:0],
+                                        // mask[23:16], mask[15:8], mask[7:0]
+                                cfg_collect <= 1'b1;
+                                cfg_idx     <= 3'd0;
+                                state       <= S_CFG_COLLECT;
                             end
                             8'h43, 8'h63: begin // 'c'/'C' -> clear cache stat counters
                                                 // (1-cycle poke to idx 4, hi=0x55)
@@ -738,8 +766,10 @@ end
                 end
 
                 // -------------------------------------------------------------
-                // Print single formatted 64-bit state line
-                // Format: "A:xxxxxx D:xx RW:x AS:x DT:x RM:x RO:x V:x PH:x T:x H:x\r\n"
+                // Print single formatted 64-bit state line (probe map v2)
+                // Format: "A:xxxxxx D:xx RW:x AS:x RM:x RO:x TR:x SA:xxxx\r\n"
+                //   A = cpuAddr[23:0]  D = data byte  RW/AS = CPU bus  RM/RO = selectRAM/ROM
+                //   TR = turbo active  SA = sdram_rd_addr[15:0] (real SDRAM word addr)
                 // -------------------------------------------------------------
                                 S_PRINT_STAT: begin
                     if (fifo_has_room) begin
@@ -762,37 +792,43 @@ end
                             13: fifo_din <= hex2ascii(sample_latch[63:60]);
                             14: fifo_din <= hex2ascii(sample_latch[59:56]);
                             15: fifo_din <= " ";
-                            16: fifo_din <= sample_latch[9] ? "R" : "W";
-                            17: fifo_din <= " ";
-                            18: fifo_din <= "A";
-                            19: fifo_din <= "S";
-                            20: fifo_din <= ":";
-                            21: fifo_din <= sample_latch[6] ? "1" : "0";
-                            22: fifo_din <= " ";
-                            23: fifo_din <= "D";
-                            24: fifo_din <= "T";
-                            25: fifo_din <= ":";
-                            26: fifo_din <= sample_latch[10] ? "1" : "0";
-                            27: fifo_din <= " ";
-                            28: fifo_din <= "R";
-                            29: fifo_din <= "M";
-                            30: fifo_din <= ":";
-                            31: fifo_din <= sample_latch[19] ? "1" : "0";
-                            32: fifo_din <= " ";
-                            33: fifo_din <= "P";
-                            34: fifo_din <= "H";
-                            35: fifo_din <= ":";
-                            36: fifo_din <= hex2ascii({1'b0, sample_latch[28:26]});
-                            37: fifo_din <= " ";
-                            38: fifo_din <= "T";
-                            39: fifo_din <= "R";
-                            40: fifo_din <= ":";
-                            41: fifo_din <= sample_latch[5] ? "1" : "0";
-                            42: fifo_din <= 8'h0D;
-                            43: fifo_din <= 8'h0A;
+                            16: fifo_din <= "R";
+                            17: fifo_din <= "W";
+                            18: fifo_din <= ":";
+                            19: fifo_din <= sample_latch[6] ? "R" : "W";
+                            20: fifo_din <= " ";
+                            21: fifo_din <= "A";
+                            22: fifo_din <= "S";
+                            23: fifo_din <= ":";
+                            24: fifo_din <= sample_latch[7] ? "1" : "0";
+                            25: fifo_din <= " ";
+                            26: fifo_din <= "R";
+                            27: fifo_din <= "M";
+                            28: fifo_din <= ":";
+                            29: fifo_din <= sample_latch[5] ? "1" : "0";
+                            30: fifo_din <= " ";
+                            31: fifo_din <= "R";
+                            32: fifo_din <= "O";
+                            33: fifo_din <= ":";
+                            34: fifo_din <= sample_latch[4] ? "1" : "0";
+                            35: fifo_din <= " ";
+                            36: fifo_din <= "T";
+                            37: fifo_din <= "R";
+                            38: fifo_din <= ":";
+                            39: fifo_din <= sample_latch[10] ? "1" : "0";
+                            40: fifo_din <= " ";
+                            41: fifo_din <= "S";
+                            42: fifo_din <= "A";
+                            43: fifo_din <= ":";
+                            44: fifo_din <= hex2ascii(sample_latch[26:23]); // sdram_rd_addr[15:12]
+                            45: fifo_din <= hex2ascii(sample_latch[22:19]); // [11:8]
+                            46: fifo_din <= hex2ascii(sample_latch[18:15]); // [7:4]
+                            47: fifo_din <= hex2ascii(sample_latch[14:11]); // [3:0]
+                            48: fifo_din <= 8'h0D;
+                            49: fifo_din <= 8'h0A;
                             default: fifo_din <= 8'h0A;
                         endcase
-                        if (dump_col == 6'd43) begin
+                        if (dump_col == 6'd49) begin
                             state <= S_IDLE;
                         end
                     end
@@ -808,49 +844,44 @@ end
                         case (dump_col)
                             0:  fifo_din <= 8'h0D;
                             1:  fifo_din <= 8'h0A;
-                            2:  fifo_din <= "#";
-                            3:  fifo_din <= "S";
-                            4:  fifo_din <= "M";
-                            5:  fifo_din <= "P";
-                            6:  fifo_din <= "L";
-                            7:  fifo_din <= " ";
-                            8:  fifo_din <= "A";
-                            9:  fifo_din <= "D";
-                            10: fifo_din <= "D";
-                            11: fifo_din <= "R";
+                            2:  fifo_din <= " ";
+                            3:  fifo_din <= " ";
+                            4:  fifo_din <= " ";
+                            5:  fifo_din <= " ";
+                            6:  fifo_din <= "A";    // ADDR (cpuAddr) 6 hex
+                            7:  fifo_din <= "D";
+                            8:  fifo_din <= "D";
+                            9:  fifo_din <= "R";
+                            10: fifo_din <= " ";
+                            11: fifo_din <= " ";
                             12: fifo_din <= " ";
-                            13: fifo_din <= " ";
-                            14: fifo_din <= " ";
-                            15: fifo_din <= "D";
-                            16: fifo_din <= "A";
-                            17: fifo_din <= "T";
+                            13: fifo_din <= "D";    // DA (data byte) 2 hex
+                            14: fifo_din <= "A";
+                            15: fifo_din <= " ";
+                            16: fifo_din <= " ";
+                            17: fifo_din <= "S";    // SADR (sdram_rd_addr) 4 hex
                             18: fifo_din <= "A";
-                            19: fifo_din <= " ";
+                            19: fifo_din <= "D";
                             20: fifo_din <= "R";
-                            21: fifo_din <= "W";
-                            22: fifo_din <= " ";
-                            23: fifo_din <= "A";
-                            24: fifo_din <= "S";
+                            21: fifo_din <= " ";
+                            22: fifo_din <= "W";    // RW (1=READ)
+                            23: fifo_din <= " ";
+                            24: fifo_din <= "S";    // _cpuAS
                             25: fifo_din <= " ";
-                            26: fifo_din <= "D";
-                            27: fifo_din <= "T";
-                            28: fifo_din <= " ";
-                            29: fifo_din <= "R";
-                            30: fifo_din <= "M";
+                            26: fifo_din <= "M";    // selectRAM
+                            27: fifo_din <= " ";
+                            28: fifo_din <= "O";    // selectROM
+                            29: fifo_din <= " ";
+                            30: fifo_din <= "H";    // cache_hit
                             31: fifo_din <= " ";
-                            32: fifo_din <= "R";
-                            33: fifo_din <= "O";
-                            34: fifo_din <= " ";
-                            35: fifo_din <= "P";
-                            36: fifo_din <= "H";
-                            37: fifo_din <= " ";
-                            38: fifo_din <= "T";
-                            39: fifo_din <= "R";
-                            40: fifo_din <= 8'h0D;
-                            41: fifo_din <= 8'h0A;
+                            32: fifo_din <= "E";    // cache_en
+                            33: fifo_din <= " ";
+                            34: fifo_din <= "T";    // turbo
+                            35: fifo_din <= 8'h0D;
+                            36: fifo_din <= 8'h0A;
                             default: fifo_din <= 8'h0A;
                         endcase
-                        if (dump_col == 6'd41) begin
+                        if (dump_col == 6'd36) begin
                             dump_col <= 0;
                             state    <= S_DUMP_ROW;
                         end
@@ -868,44 +899,41 @@ end
                             3:  fifo_din <= ":";
                             4:  fifo_din <= " ";
                             5:  fifo_din <= " ";
-                            6:  fifo_din <= hex2ascii(trace_rd_data[55:52]);
+                            6:  fifo_din <= hex2ascii(trace_rd_data[55:52]); // ADDR
                             7:  fifo_din <= hex2ascii(trace_rd_data[51:48]);
                             8:  fifo_din <= hex2ascii(trace_rd_data[47:44]);
                             9:  fifo_din <= hex2ascii(trace_rd_data[43:40]);
                             10: fifo_din <= hex2ascii(trace_rd_data[39:36]);
                             11: fifo_din <= hex2ascii(trace_rd_data[35:32]);
                             12: fifo_din <= " ";
-                            13: fifo_din <= hex2ascii(trace_rd_data[63:60]);
+                            13: fifo_din <= hex2ascii(trace_rd_data[63:60]); // DA
                             14: fifo_din <= hex2ascii(trace_rd_data[59:56]);
                             15: fifo_din <= " ";
                             16: fifo_din <= " ";
-                            17: fifo_din <= " ";
-                            18: fifo_din <= trace_rd_data[9] ? "R" : "W";
-                            19: fifo_din <= " ";
-                            20: fifo_din <= " ";
-                            21: fifo_din <= trace_rd_data[6] ? "1" : "0"; // AS
-                            22: fifo_din <= " ";
+                            17: fifo_din <= hex2ascii(trace_rd_data[26:23]); // SADR = sdram_rd_addr[15:0]
+                            18: fifo_din <= hex2ascii(trace_rd_data[22:19]);
+                            19: fifo_din <= hex2ascii(trace_rd_data[18:15]);
+                            20: fifo_din <= hex2ascii(trace_rd_data[14:11]);
+                            21: fifo_din <= " ";
+                            22: fifo_din <= trace_rd_data[6] ? "R" : "W"; // W (1=READ)
                             23: fifo_din <= " ";
-                            24: fifo_din <= trace_rd_data[10] ? "1" : "0"; // DTACK
+                            24: fifo_din <= trace_rd_data[7] ? "1" : "0";  // S = _cpuAS
                             25: fifo_din <= " ";
-                            26: fifo_din <= " ";
-                            27: fifo_din <= trace_rd_data[19] ? "1" : "0"; // RAM
-                            28: fifo_din <= " ";
+                            26: fifo_din <= trace_rd_data[5] ? "1" : "0";  // M = selectRAM
+                            27: fifo_din <= " ";
+                            28: fifo_din <= trace_rd_data[4] ? "1" : "0";  // O = selectROM
                             29: fifo_din <= " ";
-                            30: fifo_din <= trace_rd_data[20] ? "1" : "0"; // ROM
+                            30: fifo_din <= trace_rd_data[9] ? "1" : "0";  // H = cache_hit
                             31: fifo_din <= " ";
-                            32: fifo_din <= " ";
-                            33: fifo_din <= hex2ascii({1'b0, trace_rd_data[28:26]}); // SDRAM phase
-                            34: fifo_din <= " ";
-                            35: fifo_din <= " ";
-                            36: fifo_din <= trace_rd_data[5] ? "1" : "0"; // Turbo
-                            37: fifo_din <= " ";
-                            38: fifo_din <= 8'h0D;
-                            39: fifo_din <= 8'h0A;
+                            32: fifo_din <= trace_rd_data[8] ? "1" : "0";   // E = cache_en
+                            33: fifo_din <= " ";
+                            34: fifo_din <= trace_rd_data[10] ? "1" : "0"; // T = turbo
+                            35: fifo_din <= 8'h0D;
+                            36: fifo_din <= 8'h0A;
                             default: fifo_din <= 8'h0A;
                         endcase
 
-                        if (dump_col == 6'd39) begin
+                        if (dump_col == 6'd36) begin
                             dump_col <= 0;
                             state    <= S_DUMP_GAP;
                         end
@@ -931,7 +959,18 @@ end
                 // -------------------------------------------------------------
                 S_DUMP_BIN: begin
                     if (fifo_has_room) begin
-                        fifo_wr      <= 1'b1;
+                        fifo_wr <= 1'b1;
+                        if (bin_hdr) begin
+                            // first byte of the stream: circular position where
+                            // the trigger fired (rotated dump starts here).
+                            // Report 0 unless the capture actually COMPLETED
+                            // (state DONE=4): in mode 4 an aborted candidate
+                            // leaves a stale trigger_pos that must not look
+                            // like a fire (healthy desktops have >=192-sample
+                            // /AS gaps that enter the candidate state).
+                            fifo_din <= (ila_state == 3'd4) ? trigger_pos[7:0] : 8'd0;
+                            bin_hdr  <= 1'b0;
+                        end else begin
                         bin_byte_idx <= bin_byte_idx + 3'd1;
                         case (bin_byte_idx)
                             0: fifo_din <= trace_rd_data[7:0];
@@ -954,11 +993,13 @@ end
                                 trace_rd_addr <= dump_cur + 9'd1;
                             end
                         end
+                        end
                     end
                 end
 
                 // -------------------------------------------------------------
-                // Poke $F80008 control word: collect hi,lo then 1-cycle poke
+                // Poke control/identity word: collect hi,lo then 1-cycle poke
+                // (poke_cnt 0 -> idx 2 $F80008, 1 -> idx 1 $F80004)
                 // -------------------------------------------------------------
                 S_PEEK_COLLECT: begin
                     if (rx_valid) begin
@@ -967,9 +1008,33 @@ end
                             poke_hi_rx <= 1'b1;
                         end else begin
                             ice_poke_valid <= 1'b1;
-                            ice_poke_idx   <= 3'd2;
+                            ice_poke_idx   <= (poke_cnt == 2'd1) ? 3'd1 : 3'd2;
                             ice_poke_data  <= {poke_hi, rx_byte};
                             state          <= S_IDLE;
+                        end
+                    end
+                end
+
+                // -------------------------------------------------------------
+                // Collect 7 trigger-config bytes ('t' command)
+                // -------------------------------------------------------------
+                S_CFG_COLLECT: begin
+                    if (rx_valid) begin
+                        case (cfg_idx)
+                            3'd0: uart_trig_mode       <= rx_byte[2:0];
+                            3'd1: uart_trig_addr[23:16] <= rx_byte;
+                            3'd2: uart_trig_addr[15:8]  <= rx_byte;
+                            3'd3: uart_trig_addr[7:0]   <= rx_byte;
+                            3'd4: uart_trig_mask[23:16] <= rx_byte;
+                            3'd5: uart_trig_mask[15:8]  <= rx_byte;
+                            3'd6: uart_trig_mask[7:0]   <= rx_byte;
+                            default: ;
+                        endcase
+                        if (cfg_idx == 3'd6) begin
+                            cfg_collect <= 1'b0;
+                            state       <= S_IDLE;
+                        end else begin
+                            cfg_idx <= cfg_idx + 3'd1;
                         end
                     end
                 end

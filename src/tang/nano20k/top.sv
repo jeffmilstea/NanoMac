@@ -262,19 +262,30 @@ wire [2:0]  ice_poke_idx, ice_peek_idx;
 wire [15:0] ice_poke_data, ice_peek_data;
 wire        cache_hit_probe;
 wire        cache_en_probe;
+wire        osd_cache_probe;      // raw configCache from OSD/MCU
+wire        cache_sweep_probe;    // tag invalidation sweep in progress
 wire        enPhi1_raw, enPhi2_raw;
 wire        enPhi1_gated, enPhi2_gated;
 
+// Probe map v2 (2026-10-31): adds the REAL SDRAM word address the FSM
+// serviced (sdram_rd_addr), so the host can tell a CPU read from a
+// video/audio DMA read of the shared SDRAM bus. cpuAddr stays at
+// [55:32] so existing trigset addresses keep working.
 wire [63:0] ila_probes = {
-    sdram_dout[15:8],     // [63:56] upper data bus byte
+    sdram_dout[15:8],     // [63:56] data byte (sdram_dout[15:8])
     mac_probes[47:24],    // [55:32] 24-bit cpuAddr
-    ram_ready,            // [31]
-    sdram_oe,             // [30]
-    sdram_we,             // [29]
-    phase,                // [28:26] SDRAM phase
-    cache_hit_probe,      // [25]   cache hit this cycle
-    cache_en_probe,       // [24]   cache enabled (cacheable gate)
-    mac_probes[23:0]      // [23:0]  CPU control, phases, enables
+    sdram_rd_addr,        // [31:11] 21-bit real SDRAM word addr the FSM read
+    mac_probes[5],        // [10]     turbo_active
+    cache_hit_probe,      // [9]      cache hit this cycle
+    cache_en_probe,       // [8]      cache enabled (cacheable gate)
+    _cpuAS_probe,         // [7]      _cpuAS
+    mac_probes[9],        // [6]      _cpuRW (1=READ)
+    mac_probes[19],       // [5]      selectRAM
+    mac_probes[20],       // [4]      selectROM
+    mac_probes[16],       // [3]      loadPixels (video DMA read)
+    mac_probes[17],       // [2]      loadSound  (audio DMA read)
+    mac_probes[15],       // [1]      videoBusControl
+    mac_probes[14]        // [0]      cpuBusControl
 };
 
 ila ila_inst (
@@ -679,6 +690,8 @@ macplus macplus (
     ._cpuAS_probe( _cpuAS_probe ),
     .cache_hit_probe( cache_hit_probe ),
     .cache_en_probe( cache_en_probe ),
+    .osd_cache_probe( osd_cache_probe ),
+    .cache_sweep_probe( cache_sweep_probe ),
     .enPhi1_raw( enPhi1_raw ),
     .enPhi2_raw( enPhi2_raw ),
     .enPhi1_gated( enPhi1_gated ),

@@ -368,14 +368,452 @@ FAILED state (stock + OSD cache on, stripey bars on reboot).
 Recovery: set OSD Cache OFF (or just cache off + turbo off), power
 cycle -> boots clean.
 
+## ILA UPGRADE (2026-10-31) — Configurable Trigger + Capture-Rotation + A/B Snapshot
+
+### What was added (working tree, NOT yet built/flashed)
+
+**Problem the upgrade solves:**
+The poke-4 (stock + cache) repro freezes at the error-handler spin
+($0001B0-$0001B4). To diagnose the root cause we need the *last good
+cycles before the corruption* — i.e. a capture that triggers **exactly
+when the CPU jumps into the error handler** and shows 64 samples of
+context around it. The old ILA only supported:
+- `arm` ('a') = always triggers on `_cpuAS` low (first bus cycle after
+  arming — useless for a specific-address event),
+- no way to configure the trigger address/mask from the UART (the SPI
+  path had full trig_mode/trig_addr/trig_mask, but `ila_uart.sv`
+  hardcoded mode 1 on arm),
+- binary dump ('B') had no trigger-position marker, so the 256-sample
+  circular buffer couldn't be rotated to put the trigger at sample 0.
+
+**Changes (all in working tree, uncommitted, untested):**
+
+1. `src/companion/ila_uart.sv` — new 't' command:
+   `'t'` + 7 bytes: mode, addr[23:16..0], mask[23:16..0].
+   Stored in `uart_trig_mode/addr/mask` regs (reset default: mode 1
+   = _cpuAS low, addr 0x0001B0, mask 0xFFFFFF — identical to old 'a').
+   On `arm`, `ila.sv` now copies all three into the ILA trigger FSM
+   (previously only trig_mode, hardcoded to 1 by the UART layer).
+   Also: 'B' binary dump now sends 1 header byte first = trigger_pos
+   (8-bit circular position where trigger fired) so the host can
+   rotate the dump to put the trigger sample at index 0.
+
+2. `src/companion/ila.sv`:
+   - arm copy now includes trig_addr + trig_mask (was mode only),
+   - new wire `uart_trig_addr/uart_trig_mask` + ila_uart instantiation.
+
+3. `scripts/nanomac_ice.py`:
+   - new `trigset <mode> <addr> <mask>` command (mode 3 = addr match;
+     mask bit=1 means CARE. Error-handler example for the 16-word
+     window $0001B0-$0001BF: `trigset 3 0x0001B0 0xFFFFE0`.
+     NOTE: 0x0001F0 is WRONG — it leaves the upper 15 bits don't-care
+     and matches any address with bits[8:5]==0b11011 (fires on
+     unrelated desktop RAM); learned on the board 2026-10-31),
+   - `dump` reads the 2049-byte stream (1 trigger_pos header + 2048
+     sample bytes) and rotates the circular buffer so sample 0 ==
+     trigger point; also tolerant of old firmware (2048 bytes, no
+     header),
+   - `parse_sample` + VCD + table now decode the already-probed bits:
+     [18] refreshCycle, [16] loadPixels (video DMA read) — the two
+     signals needed to check "did a video/audio DMA read return
+     foreign data that poisoned a cache fill?",
+   - new `poked <lo>` command: poke the $F80004 identity word (RTL
+     'T' cmd, ice_poke_idx 1) for A/B validation — RAM write
+     landed iff peek shows $F80004 != 0x0001.
+
+**Trigger modes (ila.sv trig_mode, v2):**
+0=manual/force, 1=_cpuAS low (default), 2=_cpuAS && (selectRAM &&
+video/audio DMA active), 3=_cpuAS && (addr & mask)==(trig_addr & mask).
+(NOTE: v2 dropped the old mode 4; DTACK is no longer probed in the
+v2 map so mode 2's dtack condition is folded into the RAM-collision
+definition. Mode numbering at the UART level: `trigset <mode>` uses
+the same 0-3 set as ila.sv trig_mode.)
+
+**Probe map v2 (2026-11-01) — supersedes the old map below:**
+[63:56] sdram_dout[15:8] data byte
+[55:32] cpuAddr[23:0]            (trigger address space)
+[31:11] sdram_rd_addr[20:0]      NEW: real SDRAM word addr the FSM read
+[10]    turbo_active  [9] cache_hit  [8] cache_en
+[7]     _cpuAS  [6] _cpuRW(1=READ)  [5] selectRAM  [4] selectROM
+[3]     loadPixels  [2] loadSound  [1] videoBusControl  [0] cpuBusControl
+cpu_rd is DERIVED in the script/host as: selectRAM && cpuBusControl &&
+!loadPixels && !loadSound — i.e. the data/addr pair is a genuine CPU
+read, not a video/audio DMA read of the shared SDRAM.
+The OLD map (pre-v2) is no longer valid; do not reuse old VCDs.
+
+**Why the trigger target is $4027E8 (NOT $0001B0):**
+$0001B0 is a ROM error-handler entry in the $400000 ROM image, but the
+CPU accesses it at $4001B0 / $4027E8 (ROM is mapped at $40xxxx). The
+address the ILA trigger compares is the 24-bit cpuAddr. The actual
+ROM spin loop `6104 7000 4E75 4EBA F1F0` sits at ROM offset $027E8,
+i.e. cpuAddr = $4027E8. Triggering on the low 16-bit window $0001B0
+collides with ordinary RAM-test data reads of $00xxxx addresses
+(false positives seen on the board). Use:
+    trigset 3 0x4027E8 0xFFFFF0   (16-word window around the spin)
+This fired cleanly at the real error handler (capture3, pos=174).
+
+**How the trigger plan works for the freeze diagnosis (v2):**
+1. Boot clean (OSD Cache OFF, stock). `poke 4` to enable cache.
+2. `trigset 3 0x4027E8 0xFFFFF0` — fires the instant the CPU fetches
+   an instruction in the error-spin window.
+3. `arm`, wait for freeze (~60-100s), `dump --vcd /tmp/poke4.vcd`.
+4. In GTKWave (64ns per sample in v2): sample 0 = first error-spin
+   fetch. 64 samples before = last correct cycles. Now that SADR
+   (real SDRAM word addr) and cpu_rd are in the trace, distinguish:
+   - a CPU read (cpu_rd=1) of a $00xxxx word where SADR/cpuAddr agree
+     but data is wrong  -> genuine cache/SDRAM data corruption, OR
+   - a video/audio DMA (loadPixels/loadSound=1) reading SDRAM in the
+     same window  -> shared-bus collision hypothesis.
+5. A/B `poked`/`peek` as a second, independent fault injection.
+
+**2026-11-01 board captures:**
+- capture1 (mask 0x0001F0): false trigger on desktop RAM $3F53B2.
+- capture2 (mask 0xFFFFE0 on $0001B0): false trigger on RAM-test data
+  read $0001B6 while ROM executed at $401AAA.
+- capture3 (trigset 3 0x4027E8 0xFFFFF0, v1 map): CORRECT trigger at the
+  error spin. Pre-trigger showed a sequential read sweep $00DB6DD8-
+  $00DB6DE4 (rw=R, ram_cs=0, rom_cs=0, cache_en=0) just before the jump
+  to the error handler — but with v1's probe map that sweep's cpuAddr
+  vs sdram address couldn't be disambiguated (video DMA confound).
+- capture4 (v2 map, trigset 3 0x4027E8 0xFFFFF0): whole 256-sample
+  window is INSIDE the handler: ROM $402764-$4027F8 (display routine),
+  screen-RAM writes $3E4DBA-$3E4DC6, low-RAM reg/data reads
+  $00014C/$01BE54. No video/audio DMA in window. The faulting fetch
+  is BEFORE sample 128 (outside the window) -> need an EARLIER trigger.
+
+## 2026-11-01 MAJOR CORRECTION: the "5865 oracle artifacts" were ORACLE BUGS
+The sim cache-oracle sampled the data bus at the DTACK ASSERT edge
+(phase 4). The 68k (fx68k) latches iEdb at enPhi2, at/after DTACK
+DEASSERT (~phase 7). On a stock MISS, at phase 4 the bus still holds
+the PREVIOUS cycle's sdram_do (stale); the oracle's `delivered==
+cachedata` guard mis-fires and flags "CACHE FAULT" against the newly-
+written value. DEBUG_MEM evidence (word 0): RAM-test readbacks at
+929.75x are 0001 -> FFFE -> 0001 -> FFFE -> 0001 (exactly what the
+test wrote); `SDRAM READ 000400->00000000 = 10000` (upper half 0001)
+is correct. The flagged "delivered=FFFE@000000 / 0001@080000" pair
+was the same word's data 2 phases stale. Consequences:
+- 5865 "bad" flags in every prior cache-ON run = oracle mis-sampling,
+  NOT cache corruption.
+- The 6GB "spin loop" in prior cache-ON sim runs was the machine at
+  the DESKTOP (healthy), plus a GetTickCountMs 32-bit overflow in the
+  "Speed factor" display.
+- Oracle fix (nanomac_tb.cpp): sample on dtack 0->1 edge. (First fix
+  overshot to next cycle -> hits=0; the correct tick is phase 7 of
+  the access cycle: DTACK low, data valid for BOTH hit and miss.)
+  [PENDING: finalize oracle edge, re-baseline, re-verify cache-ON sim
+  shows bad=0 AND non-zero hits.]
+- Sim verdict: cache-ON-from-t0 boots to desktop and idles healthy;
+  RAM-test readback data verified correct via DEBUG_MEM.
+
+## Board bug is BOARD-ONLY (sim does not reproduce, even in-scenario)
+- Sim late-enable (cache 0->1 at 5000ms = desktop; --cache-late 5000):
+  clean 62s+ post-enable, LEDs healthy, bad=0, no freeze.
+- Board poke-4 (same scenario): freeze every time (~60-110s).
+So the fault is NOT in the shared cache logic (bram_cache.sv fill/tag/
+DTACK proven correct in sim). It must involve what the sim can't
+model: real SDRAM (refresh/timing/signal integrity), real clock/PLL
+behavior, or a board-only path (MCU/OSD config bounce during the poke,
+hw_cache_en glitch, SD card, video). Note poke-4 passes F80008 through
+the ICE path and triggers the 1024-cycle invalidate sweep — watch for a
+race between sweep completion and a coincident video DMA / MCU
+config re-send.
+
+## capture5 (2026-11-01, trigset 3 0x402680 0xFFFFF0, entry trigger) — SUSPICIOUS
+- dump reported pos=0 (trigger_pos was still the RESET DEFAULT 0 -> the
+  trigger likely NEVER fired; the ILA stayed in ARMED and the ring
+  scrolled). ALL 256 samples show the CPU DEAD: CA stuck $BE003E,
+  AS:1 (no bus cycle), loadPixels flickering, sdram_addr scanning the
+  video framebuffer ($1FB500-$1FD200) — pure video refresh, no CPU.
+- So in this run the CPU died at $BE003E WITHOUT ever fetching the
+  $402680 handler entry (or the trigger config never took effect).
+  Either way the entry-trigger plan is UNVERIFIED — the trigger path
+  itself needs a canary test before trusting any capture.
+- ILA FSM (ila.sv ~240-275): ARM_PRE fills 64 samples, ARMED keeps
+  writing the ring continuously until trigger_hit, then POST_FILL
+  writes 192 more and stops. trigger_pos = wr_ptr AT trigger (8-bit),
+  else stays 0 from reset. Host rotates dump so index 0 == trigger.
+  If >256 samples pass before the trigger, pre-trigger context is lost
+  (ring overwrote it) — but the post 192 remain valid.
+- NEW SUSPICION to chase: CPU park address $BE003E with AS:1 — the
+  CPU may hang before the error handler (no fetch at all), which no
+  address-trigger can catch. A mode-1 (AS low) canary would catch any
+  bus activity; if even AS never drops after the fault, the CPU
+  stopped fetching entirely.
+
+## SESSION 2026-11-02 (new): freeze is a HARD HANG; all triggers structurally blind to it
+
+### Board canary on the STILL-FROZEN board (no power cycle needed)
+- `state` x3 over ~1s: CPU parked A:BE003E, AS:1 in EVERY sample, D byte = video
+  data (FF/66), SA (sdram_rd_addr) walking the framebuffer, TR:0, RM:0, RO:0.
+  => the CPU is making ZERO bus cycles: this is a hard hang, not a spin.
+- peek: F80008:0404 (poke-4 cache-on stock), F80010/14/18 all FFFF (saturated
+  before death), F8001C:000E, F8000C:DEAD (GIT_HASH fallback).
+- $BE003E decodes to SCC (addrDecoder.v casez 4'b10?1 -> selectSCC; $B=1011
+  matches). A normal SCC access DTACKs immediately (io_done=1 in stock), so a
+  CPU issuing $BExxxx cycles would show /AS pulsing — it does not. AS:1
+  persistently means the 68k is NOT even starting cycles: stuck between
+  instructions (corrupt PC/stack/vector, or a wedged interrupt path). $BE003E
+  is the address the A-bus holds while idle — likely the corrupted PC or the
+  target of an incomplete long JMP/exception.
+
+### ROOT CAUSE of "capture5 trigger never fired"
+- Ran mode-1 (AS low) canary live: trigset 1 0 0 + arm + dump -> pos=0,
+  never fired, all samples AS:1. The trigger path (trigset -> arm ->
+  trigger_hit -> trigger_pos) is VERIFIED GOOD (mode-1 fired correctly in
+  earlier healthy captures).
+- WHY it can never catch this fault: EVERY trigger mode in ila.sv
+  (1=!_as, 2=!_as&&collision, 3=!_as&&addr_match) requires _as LOW. A
+  hard-hung CPU never asserts /AS. So address triggers are USELESS for this
+  freeze class. The $402680 entry trigger in capture5 was pointless IF the
+  CPU hangs before/independently of the error handler — which the $BE003E
+  dead-CPU state shows it does.
+
+### FIX: ILA trigger mode 4 = CPU-bus-silence (hang) detect  [RTL DONE, sim-validated]
+- src/companion/ila.sv: quiet_cnt counts consecutive samples with _as high
+  (probes[7]), resets on any _as low. HANG_THRESH=192 samples (~12us) of
+  total bus silence -> trigger_hit (mode 4). Reset on disarm/reset/arm.
+- 192 is EVIDENCE-BASED: measured the healthy desktop max /AS gap in sim
+  (new asGapMax tracker in nanomac_tb.cpp, cache off, 44s idle desktop):
+  262 sim-ticks = 131 ILA samples (one event at desktop entry 13.175ms, never
+  exceeded). 192 = 1.47x margin. Also <256 so after rotation the LAST CPU
+  cycle before silence is at index 64 with 191 pre-hang samples.
+  (An initial HANG_THRESH=128 would have FALSE-FIRED on a healthy desktop —
+  caught before flashing.)
+- Behavioral validation: sim/ila_hang_tb.sv (standalone Verilator TB driving
+  the real ila+ila_uart via SPI CMD1/CMD3). RESULT: healthy pattern (gaps
+  up to 180) does NOT fire; hang (AS high 260) fires at exactly quiet=192
+  with non-zero trigger_pos. Build:
+  verilator -j 4 --timing --binary -Wno-lint ... -top-module ila_hang_tb
+    ../src/companion/ila.sv ../src/companion/ila_uart.sv ila_hang_tb.sv
+  ./obj_dir/Vila_hang_tb   -> all PASS
+- scripts/nanomac_ice.py: trigset 4 now documented (mode 4, addr/mask ignored).
+- NOTE the ILA has NO sim coverage in nanomac_tb.v (companion not compiled in
+  Verilator main sim) — hence the standalone TB above + Gowin synth as the
+  final check. Companion changes are NOT Verilator-sim-validated against the
+  full machine, only lint + standalone TB + synth.
+
+### SIM ORACLE FINALIZED (the "5865 artifacts" saga closed)
+- nanomac_tb.cpp cache_oracle now samples at PHASE 6 (not DTACK edges):
+  phase==6 && !dtack && read && (ram_req||rom_req) && cache_hit -> compare
+  cpu_data_in_dbg vs ground truth. Phase 7 = cycle end (/AS already up,
+  selects cleared -> hits=0); DTACK-deassert edge overshoots into next cycle
+  (the earlier "first fix"); phase 4 = stale data (original 5865 bug).
+  Phase 6 = S7 latch state: data valid for BOTH hit (cache_data stable since
+  ph3) and stock miss (sdram_do valid since ph6).
+- Re-baseline (cache ON, fastboot 0): ORACLE bad=0, hits ~700k/s (1M by 1.1s
+  after RAM test), fills saturate FFFF (16-bit), diagPh6NoHit=0 (on 100% of
+  verified hits the cache actually drove the bus with the checked word).
+- New asGapMax tracker in the same file (for HANG_THRESH sizing); desktop
+  gap max = 131 ILA samples.
+
+### MODE-4 REDESIGN: two-stage hang detect (board-calibrated 2026-11-02)
+Single-level silence thresholds FAILED on the live board: HANG_THRESH=192
+false-fired (pos=195, within ~15us of arm on a healthy desktop) and 160
+false-fired too (pos=176). Authoritative live measurement
+(scripts/measure_as_gap.py, ~4kHz /AS polling, 75s settled desktop): the
+desktop 68k has RECURRENT /AS-deasserted silences of 10-12us (>=192
+samples) between instruction bursts — so any threshold <=~4ms false-fires,
+and any threshold >16.3us (ring width) loses the pre-hang context.
+TWO-STAGE FIX in ila.sv:
+  - HANG_CAND=192 silent samples -> new state ILA_CANDIDATE: FREEZE the ring
+    (stop overwriting), trigger_pos = wr_ptr - 192 (position of the LAST CPU
+    bus cycle). Any live /AS-low cycle aborts the candidate -> back to ARMED
+    (ring resumes from the same pointer; harmless).
+  - HANG_CONF=60000 silent samples (3.84ms, below the 65535=4.19ms
+    quiet_cnt cap) -> ILA_DONE (confirmed hang). Healthy silence never
+    exceeds ~1-2ms (VIA timer tick ~1ms releases the WAIT loop).
+  On confirm: rotated dump index 0 = hang onset; indices 192..255 = the
+  last 64 CPU samples before the hang (the smoking gun).
+- Verilator TB (sim/ila_hang_tb.sv, drives real ila via SPI CMD1/CMD3)
+  all-PASS: 20 live-range 195-sample gaps entered candidate and ALL aborted
+  (state back to ARMED, no false trigger); hard hang (61000 silent) ->
+  DONE with non-zero trigger_pos.
+
+### NEXT BOARD PLAN (flash #3 already done: HANG_CAND=192/HANG_CONF=60000)
+1. Power cycle (OSD Cache OFF, stock). Let the desktop SETTLE 60s+ (the
+   false-fires at 192/160 were partly mid-boot; settled rhythm matters).
+2. SETTLED canary: `trigset 4` + `arm`, wait 30s, `dump` -> MUST be pos=0
+   (candidates abort; never reach DONE). If it fires, the threshold needs
+   another pass (re-measure with scripts/measure_as_gap.py first).
+3. `poke 4`, wait for the ~60-110s freeze.
+4. `dump --vcd /tmp/hang.vcd` -> expect pos!=0. Rotated index 0 = hang
+   onset; index ~192 = LAST CPU bus cycle (addr + data + SADDR +
+   cache_en/hit at the moment of death); samples 193-255 = final
+   instruction sequence. That identifies: bad instruction vs bad data vs
+   video-DMA collision vs clock/config wedge.
+5. Secondary (if the last CPU cycle looks normal -> not a data fault): add
+   sweep-complete + hw_cache_en + configCache to ila_probes (v3 probe map;
+   osd_cache_probe/cache_sweep_probe exist on macplus but are not probed
+   yet; sacrifice the sdram_dout byte [63:56] or widen the map).
+
+### FLASH #4 (2026-11-02 ~13:00 UTC): trigger_pos gated to CONFIRM
+Live canary with flash #3 (two-stage) proved the machine alive (ring
+256/256 live samples, no DONE), but reported stale non-zero pos (155/153/
+229) because trigger_pos was stamped at CANDIDATE (stage 1), and healthy
+>=192-sample /AS gaps enter the candidate state constantly. A canary must
+report pos=0 when healthy. Fix (Verilator-TB re-validated all-PASS):
+- ila.sv: trigger_pos stamped only at CONFIRM (stage 2 -> DONE); candidate
+  no longer touches it. Healthy desktop -> pos=0; hang -> pos!=0.
+- ila_uart.sv B-dump: header byte = trigger_pos only if ila_state==DONE(4),
+  else 0 (defense in depth for all modes).
+- sim/ila_hang_tb.sv now asserts pos==0 after aborted candidates: healthy
+  195-sample gaps -> ARMED + pos=0; hard hang (61000 silent) -> DONE
+  pos=245. ALL PASS.
+Board has flash #4 in SPI; power cycle + OSD Cache OFF, settle 60s, then:
+canary (expect pos=0) -> poke 4 -> freeze -> dump (expect pos!=0, DONE).
+### Board state right now
+- Board has flash #4 in SPI, NOT yet power-cycled since the flash.
+- sim/nanomac is built HEADLESS with the phase-6 oracle (bad=0 baseline) +
+  asGapMax tracker.
+- sim/ila_hang_tb.sv + obj_dir hold the standalone two-stage hang TB.
+- NOTE: address-trigger plans (trigset 3 0x402680 entry / F-space vector)
+  are OBSOLETE for this freeze class — the CPU hangs with /AS never low,
+  so modes 1-3 can never fire on it. Keep them only for spins (bad-
+  instruction freezes, which do go through the error handler).
+
+## 2026-11-03: hang.vcd DECODED - ROOT-CAUSE CANDIDATE (CPU read slot stolen by video; last cycle never serviced)
+
+### The capture that answered it
+Board had flash #4; previous session ran the plan (canary OK, poke 4, freeze,
+dump). /tmp/hang.vcd = two-stage mode-4 confirmation capture (13:20 UTC Nov 2).
+Rotation: index 0 = trigger (wr_ptr-192), indices 1..191 = post-hang silence,
+indices 192..255 = pre-hang (254 = last live sample, 255 = first silent).
+Post-hang silence: 192 samples AS=1, SADR walking video RAM 1FD4D3->1FD4DF
+(video refresh alive), D=00/3F. CPU makes ZERO further bus cycles.
+
+### The last 5 CPU bus cycles (chronological; all stock TR=0, cache on C$E=1)
+  1. idx192-198  W $000004  (vector 1 area, lo word)   C$H=0  SDRAM serviced (SADR 000002)
+  2. idx202-214  W $000006  (vector 1 area, hi word)   C$H=0  serviced (SADR 000003)
+  3. idx218-230  R $00000C  DHi=21 (vector 3 = illegal-instr vector lo)  serviced
+  4. idx234-246  R $00000E  DHi=00 (vector 3 hi)  serviced
+  5. idx250-254  R $00003E  (vector 15 lo byte, $00003C-3F = 11-line-addr-error
+                 / supervisor-illegal area)  ** DROPPED: SADR shows 000007
+                 (stale) then 1FD4D3 = a VIDEO read; never 00001F **
+  -> permanent AS-high. Nothing else ever happens.
+
+NOTE: CADDR in probe map v2 IS the full 24-bit byte address (SADR == CADDR/2
+on CPU accesses confirms it). Do NOT multiply by 2 again (earlier session
+mis-decoded the window as $000008/$00000C etc. - wrong).
+
+### What the address pattern means
+$000004/$000006 = one move.l writing vector 1 ($000002-000007 = $402xxx ROM
+handler area or a trap vector redirect); $00000C/$00000E = one move.l reading
+vector 3; $00003E = byte of vector 15. This is a ROM exception-handler /
+crash-logging code path (same family as the $4027EC BSR spin seen earlier).
+So the machine had ALREADY taken an exception ~1ms before this window; this
+window is the handler's tail. Sequence = (a) early exception (origin
+undetermined, needs earlier trigger), then (b) the final vector read is
+dropped by the video/CPU SDRAM conflict -> hard hang.
+
+### THE KEY FAULT (provable from the trace): a CPU RAM read got no SDRAM
+fetch slot -> no valid data -> the 68k parks with /AS high forever
+Mechanism (stock mode, single shared phase-2 SDRAM fetch):
+- The SDRAM FSM (src/tang/nano20k/sdram.v) accepts EXACTLY ONE request per
+  phase-2 tick: `if (state==IDLE && phase==2) if (oe||we) ACTIVE... else
+  AUTO_REFRESH`. oe/we/addr come from addrController.v:
+  `_ramOE = ~((cpu_ram_access && _cpuRW) || va_ram_access)` and
+  `addrMux = loadPixels?videoAddr:loadSound?audioAddr:cpuAddr[21:1]`
+  (line 108) - video and CPU share ONE fetch slot per E-cycle, and on the
+  video half-cycle the address mux selects the VIDEO address.
+- macplus.sv:238: ram_req set at `busPhase==2 && selectRAM && cpu_slot`,
+  `cpu_slot = cpuBusControl || (!loadPixels && !loadSound && !refreshCycle)`.
+  Intent: on a phase-2 tick in the video half-slot, video wins the SDRAM
+  fetch (loadPixels=1 -> video addr on the bus, _ramOE=1 for video,
+  ram_req not set); on the CPU half-slot, the CPU read gets it.
+- BUT /AS asserts at a random phase grid position (68k 7.83MHz vs 15.667MHz
+  grid = 2.5:1, drifts through all alignments). If the address-valid moment
+  of a CPU RAM read coincides with a phase-2 tick in the video half (or the
+  E-cycle's phase-2 tick falls in the video slot), the SDRAM FSM fetches the
+  VIDEO address: sdram_rd_done fires with sdram_rd_addr = video address.
+  Two corrupt outcomes:
+    (i)  cpu-side ram_done (busPhase>=4) still DTACKs, but sdram_do carries
+         video data => CPU latches garbage (poisoned read), OR
+    (ii) fill match fails: ram_fill_evt requires sdram_rd_addr==miss_addr
+         (macplus.sv:521-522) => NO fill => line never valid => that line
+         re-misses forever (C$E=1, C$H=0 on all 5 traced accesses = cache
+         NEVER catches these lines).
+- In the capture, access 5 (R $00003E): ram_cs high, C$E=1, C$H=0,
+  loadPixels=1, SADR = 1FD4D3 (video), never 00001F. The read was never
+  serviced as a CPU read. After it: permanent AS-high.
+- WHY the 68k goes AS-high instead of AS-low-forever: the 68k latched
+  garbage/never-completed; with the address stuck at $00003E and the
+  instruction never completing, the CPU sits in idle between instructions
+  (A-bus holds the last address; no fetch issued). The exact fx68k internal
+  state (S4 stuck vs idle-with-stuck-urom) is a minor open question - the
+  functional fault is identical either way.
+
+### Why cache-OFF boots clean / cache-ON freezes in 60-110s (board-only)
+- The video/CPU phase-2 collision exists regardless of cache (stock
+  arbiter RTL). With cache OFF, the hot code/data is re-read from SDRAM
+  every time, but a poisoned read at the desktop mostly hits tolerant
+  code paths or the specific phase-2 alignment rarely coincides with a
+  CRITICAL read (vector fetch, instruction fetch in a tight loop). The
+  60-110s delay after poke-4: the 1024-line invalidate sweep fires on
+  cache-enable; every first re-touch is a MISS that MUST win the phase-2
+  slot. 1M+ misses/sec re-touching hot lines => a fatal alignment
+  (miss fetch on a video-slot phase-2) lands within seconds-to-minutes.
+- ALSO the fill-drop (outcome ii) means cache lines in the hot region are
+  permanently invalid => miss rate stays at ~100% for those lines after
+  enable, maximizing the collision surface exactly where the freeze hits.
+- Sim cannot reproduce: the Verilator SDRAM mock services requests
+  without honoring the phase-2 single-slot/video arbitration (and the sim
+  video grid may be phase-locked such that a CPU /AS never lands on the
+  colliding tick). Confirmed board-only.
+
+### CONFIRMATION STEPS (next board session, in priority order)
+1. CHEAPEST & STRONGEST: repeat poke-4 freeze with the display OFF
+   (unplug HDMI or OSD video off => no video DMA). If the machine no
+   longer freezes within ~5min, the video/CPU SDRAM collision is
+   confirmed as the trigger.
+2. ILA probe v3: sacrifice sdram_dout byte [63:56] for ram_req +
+   cache_in_sweep + cache_en_cfg (osd_cache_probe/cache_sweep_probe
+   exist in macplus but are not probed). Then a freeze dump shows
+   directly: last CPU cycle had ram_req=0 (slot stolen) vs ram_req=1
+   (FSM/SDRAM fault).
+3. Sim repro: in nanomac_tb, force a CPU RAM read whose /AS-assert
+   lands on a phase-2 tick during loadPixels (scriptable: hold video
+   at a known phase, fire the read) and check whether the mock SDRAM
+   serves the CPU or the video address. If the mock serves the CPU,
+   the mock is masking the bug - fix it to honor the phase-2 single
+   slot and the sim should reproduce the freeze.
+4. First-exception origin: trigger on the FIRST vector-table write
+   (trigset 3 0x000004 0xFFFFFF) to catch what the original exception
+   was (the pre-hang window here only shows the handler tail).
+
+### FIX DIRECTION (NOT implemented; follow validate-in-sim-first rule)
+Preferred (Option A): CPU access wins the phase-2 SDRAM slot - suppress
+video pixel fetch on any phase-2 tick where a CPU RAM/ROM access is
+address-valid (selectRAM||selectROM && !_cpuAS). Video drops one
+pixel-cycle (invisible); CPU always serviced. Change point:
+addrController.v _ramOE/addrMux (gate va_ram_access with
+!(selectRAM||selectROM && !_cpuAS)) or macplus.sv cpu_slot usage.
+Option B: SDRAM FSM accepts a late/queued request when phase-2 was
+taken by video (2-deep request queue). Bigger change.
+Option C (cache-only mitigation): on fill-address mismatch, re-issue
+the miss (retry next slot). Masks, does not fix poisoned cache-off reads.
+
+### OPEN SUB-QUESTIONS (do not lose)
+- Q1: which exception fired FIRST 60-110s after poke-4 (the root
+  trigger of the crash that the handler then logged)? Step 4 above.
+- Q2: $BE003E park address (state x3 on frozen board) = SCC-decoded
+  idle A-bus of the same stuck 68k (normal SCC cycles DTACK instantly,
+  so AS:1 persistent = same stuck-bus class), likely corrupted PC.
+- Q3: reconcile "rAS only clears on S6" with AS-high-after-hang:
+  either the 68k completed access 5 with garbage (S6 OK, urom stuck
+  in a stuck fetch of a bad vector), or fx68k has a stall path not
+  yet traced. Low priority - the chipset-side dropped read is the
+  proven fault.
+
 ## Clocks/phase reference (stock mode)
+
 clk_sys=clk_pixel=15.6672MHz; 8 phases per E-cycle; /AS low from phase 2;
 ram_req/rom_req set at phase 2; cache_hit valid from phase 3; DTACK: hit@3,
 stock miss@4, turbo miss@7; cache_wr_pulse (invalidate) @ phase 2 of RAM write.
 Turbo: cpu 19.584MHz via DCS (39.168 raw /2), enPhi alternating.
-ILA: clk_pixel, 256x64 trace, probe map: [25]cache_hit [24]cache_en
-[55:32]cpuAddr [63:56]sdram_dout[15:8] [10]DTACK [9]RW [8]LDS [7]UDS
-[6]AS [5]turbo [4:3]enPhi [2:0]busPhase [19]selectRAM [20]selectROM.
+ILA: clk_pixel, 256x64 trace, probe map v2 (see "Probe map v2" above;
+[55:32]cpuAddr, [31:11]sdram_rd_addr, [9]cache_hit [8]cache_en [7]AS
+[6]RW [5]selectRAM [4]selectROM [3]loadPixels [2]loadSound [1]videoBMC
+[0]cpuBMC, [10]turbo).
 
 ## Lessons / user preferences
 - ALWAYS validate fixes in Verilator before building/Flashing (user instruction).

@@ -19,6 +19,13 @@ Vnanomac_tb *tb;
 static VerilatedFstC *trace;
 double simulation_time;
 
+// Late cache-enable experiment (models MCU restoring OSD config mid-boot):
+// hold the tb cache input low until `cache_late_ms` after t=0, then raise it.
+// `cache_toggles` adds N extra 100ms off/on pulses after the first enable
+// (models the MCU re-sending the config value, i.e. extra 0->1 edges).
+double cache_late_ms = 0;
+int    cache_toggles = 0;
+
 #define ROM "plusrom.bin"
 
 #define RAM_SIZE 2    // 0=128k, 1=512k, 2=1MB, 3=4MB
@@ -346,14 +353,22 @@ static uint16_t oracle_mem_word(uint32_t a) {
 
 void cache_oracle(double t) {
   static int last_sec = -1;
+  static uint64_t diag_ph6 = 0, diag_ph6_nohit = 0;
   static uint32_t prev_addr = 0;
   static int prev_ram_req = 0, prev_rom_req = 0, prev_delivery = 0;
+  // /AS gap tracker for ILA HANG_THRESH sizing: count consecutive sim ticks
+  // with /AS deasserted (bus idle). Only tracked after the desktop is up
+  // (t>13s) so the cold-boot phase (CPU not yet fetching) doesn't pollute it.
+  static uint32_t as_gap = 0, as_gap_max = 0, as_gap_max_t_ms = 0;
   int sec = (int)t;
   if(sec != last_sec) {
     last_sec = sec;
-    printf("ORACLE %ds: hits=%llu bad=%llu fills=%llu first_wr=%dms last_bad=%dms\n", sec,
-           (unsigned long long)co_hits, (unsigned long long)co_hits_bad,
-           (unsigned long long)co_fills, co_first_write_ms, co_last_bad_ms);
+    printf("ORACLE %ds: hits=%llu bad=%llu fills=%llu diagPh6=%llu diagPh6NoHit=%llu asGapMax=%u(@%dms) first_wr=%dms last_bad=%dms\n",
+           sec, (unsigned long long)co_hits, (unsigned long long)co_hits_bad,
+           (unsigned long long)co_fills, (unsigned long long)diag_ph6,
+           (unsigned long long)diag_ph6_nohit,
+           as_gap_max, as_gap_max_t_ms,
+           co_first_write_ms, co_last_bad_ms);
   }
   uint32_t addr = (tb->mac_probes_dbg >> 24) & 0xFFFFFF;
   int ram_req = (tb->mac_probes_dbg >> 11) & 1;
@@ -362,38 +377,54 @@ void cache_oracle(double t) {
   if(is_wr && ram_req && co_first_write_ms < 0)
     co_first_write_ms = (int)(t*1000*1000)/1000;
 
-  // Cache drives the data bus when cache_hit && (ram_req||rom_req).
-  // The BRAM read port is registered: cache_data at tick T was loaded from
-  // the line selected at tick T-1, so ground truth is prev_addr (stable
-  // during the access). Check on the first delivery tick of a hit window.
   int delivery = tb->cache_hit_dbg && (ram_req || rom_req);
 
   dbg_push(t, tb->mac_probes_dbg, tb->cache_data_dbg, tb->cpu_data_in_dbg);
   int dtack = (tb->mac_probes_dbg >> 10) & 1; // _cpuDTACK (1=deasserted, 0=asserted)
   int read  = (tb->mac_probes_dbg >> 9)  & 1; // _cpuRW (1=read)
+  int phase = (int)(tb->mac_probes_dbg & 7);  // busPhase [2:0]
 
-  // The 68k samples the data bus when /DTACK asserts (1 -> 0 transition) on a
-  // memory read. That is the one tick the delivered value must be correct.
-  if(co_prev_dtack == 1 && dtack == 0 && read && (ram_req || rom_req)) {
-    uint16_t delivered = tb->cpu_data_in_dbg;  // iEdb, the bus the CPU latches
-    uint16_t cachedata = tb->cache_data_dbg;   // word the cache produced
-    // Only flag when the CACHE actually drove the bus (delivered == cachedata)
-    // AND that word differs from memory. If delivered != cachedata the cache
-    // was not the source (e.g. boot-overlay ROM at low addresses) -> not a fault.
-    if(delivered == cachedata) {
+  // /AS-gap tracking (desktop only, t>13s): max consecutive ticks with /AS
+  // deasserted. Sizing data for the ILA HANG_THRESH (mode 4 hang trigger).
+  int as_hi = (tb->mac_probes_dbg >> 6) & 1;  // _cpuAS (1=deasserted)
+  if (t > 13.0) {
+    if (as_hi) {
+      if (as_gap > as_gap_max) { as_gap_max = as_gap; as_gap_max_t_ms = (int)(t*1000); }
+      as_gap++;
+    } else {
+      as_gap = 0;
+    }
+  }
+  // The 68k (fx68k dataIo) latches iEdb at the T4 of bus phase S7, i.e. with
+  // the bus still in the access. On this 8-phase grid the read data is valid
+  // at phase 6 for BOTH cases:
+  //   hit  -> cache_data (BRAM output registered at ph3, stable through ph7)
+  //   miss -> sdram_do   (FSM returns data at ph6, stable through ph7)
+  // At phase 7 the 68k has deasserted /AS (cycle end) so ram/rom_req and the
+  // select/cache_hit have cleared -> nothing to verify there.
+  // (The original oracle sampled the DTACK ASSERT edge (ph4): on a miss the
+  //  bus still held the PREVIOUS cycle's stale data -> thousands of false
+  //  "CACHE FAULT" flags. The DTACK-deassert edge (first patch) overshoots
+  //  into the next cycle -> hits=0.)
+  if(phase == 6 && !dtack && read && (ram_req || rom_req)) {
+    if(tb->cache_hit_dbg) {
+      uint16_t delivered = tb->cpu_data_in_dbg;  // iEdb the CPU latches
+      uint16_t cachedata = tb->cache_data_dbg;   // word the cache produced
       co_hits++;
+      if(delivered != cachedata) diag_ph6_nohit++;
       uint16_t exp = rom_req ? SWAP16(rom[tb->romAddr]) : SWAP16(ram[addr>>1]);
       if(delivered != exp) {
         co_hits_bad++;
         co_last_bad_ms = (int)(t*1000*1000)/1000;
         if(dbg_dumped < 3) { dbg_dump(t); dbg_dumped++; }
         if(co_hits_bad <= 25)
-          printf("%.3fms CACHE FAULT: addr=%06X delivered=%04X expected=%04X ramReq=%d romReq=%d\n",
-                 t*1000, addr, delivered, exp, ram_req, rom_req);
+          printf("%.3fms CACHE FAULT: addr=%06X delivered=%04X cachedata=%04X expected=%04X ramReq=%d romReq=%d\n",
+                 t*1000, addr, delivered, cachedata, exp, ram_req, rom_req);
       }
+    } else {
+      diag_ph6++; // cacheable read in flight at ph6 but no hit (miss)
     }
   }
-  co_prev_dtack = dtack;
   prev_addr = addr;
   prev_ram_req = ram_req;
   prev_rom_req = rom_req;
@@ -424,6 +455,34 @@ void tick(int c) {
   tb->eval();
 
   tb->clk = c;
+
+  // ---- late cache-enable experiment (models MCU restoring OSD config) ----
+  // Hold tb->cache low until cache_late_ms, then raise it; optionally drop
+  // it for 100ms windows 200ms apart (cache_toggles) to model re-sends.
+  static int    cl_on = 0;
+  static double cl_t_on = 0;
+  if (cache_late_ms > 0 || cache_toggles > 0) {
+    double now_ms = simulation_time * 1000.0;
+    if (!cl_on && now_ms >= cache_late_ms) {
+      tb->cache = 1;
+      cl_on = 1;
+      cl_t_on = now_ms;
+      printf("%.3fms CACHE-CTL: enable (late by %.0f ms)\n", now_ms, cache_late_ms);
+    }
+    if (cl_on && cache_toggles > 0) {
+      for (int k = 1; k <= cache_toggles; k++) {
+        double toff = cl_t_on + 200.0 * k;
+        double ton  = toff + 100.0;
+        if (now_ms >= toff && now_ms < ton && tb->cache) {
+          tb->cache = 0;
+          printf("%.3fms CACHE-CTL: deassert (toggle %d/%d)\n", now_ms, k, cache_toggles);
+        } else if (now_ms >= ton && now_ms < ton + 1.0 && !tb->cache) {
+          tb->cache = 1;
+          printf("%.3fms CACHE-CTL: re-assert (toggle %d/%d)\n", now_ms, k, cache_toggles);
+        }
+      }
+    }
+  }
 
   static  int leds = 0;
   if(leds != tb->leds) {
@@ -679,10 +738,15 @@ int main(int argc, char **argv) {
       tb->cache = atoi(argv[++i]);
     } else if (strcmp(argv[i], "--fastboot") == 0 && i + 1 < argc) {
       tb->fastboot = atoi(argv[++i]);
+    } else if (strcmp(argv[i], "--cache-late") == 0 && i + 1 < argc) {
+      cache_late_ms = atof(argv[++i]);
+      if (tb->cache) tb->cache = 0; // raised by the experiment at cache_late_ms
+    } else if (strcmp(argv[i], "--cache-toggles") == 0 && i + 1 < argc) {
+      cache_toggles = atoi(argv[++i]);
     }
   }
-  printf("NanoMac Simulation starting with Turbo=%d cache=%d fastboot=%d\n",
-         tb->turbo, tb->cache, tb->fastboot);
+  printf("NanoMac Simulation starting with Turbo=%d cache=%d fastboot=%d cache-late=%.0fms toggles=%d\n",
+         tb->turbo, tb->cache, tb->fastboot, cache_late_ms, cache_toggles);
   
   /* run for a while */
   while(

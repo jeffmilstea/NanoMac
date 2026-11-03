@@ -253,6 +253,8 @@ macplus macplus (
 	       // cache debug
 	       .cache_hit_probe(cache_hit_dbg),
 	       .cache_data_dbg(cache_data_dbg),
+	       .osd_cache_probe(),
+	       .cache_sweep_probe(),
 	       .cpu_data_in_dbg(cpu_data_in_dbg),
 	       .cache_hits(cache_hits_dbg),
 	       .cache_misses(cache_misses_dbg),

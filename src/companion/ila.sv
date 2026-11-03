@@ -149,9 +149,11 @@ module ila (
     reg [ADDR_WIDTH-1:0] rd_ptr;
     reg [2:0]            rd_byte_idx;
     reg [63:0]           rd_data_latch;
+    reg sample_clk_sel; // 0 = clk (78MHz), 1 = pixel clock (kept for SPI config compat)
 
-    reg sample_clk_sel; // 0 = clk (78MHz), 1 = pixel clock (phase 0)
-    wire sample_tick = sample_clk_sel ? (probes[2:0] == 3'd0) : 1'b1;
+    // v2 probe map drops the phase field; the ILA runs on clk_pixel
+    // (15.6672 MHz) so we simply sample every clock.
+    wire sample_tick = 1'b1;
 
     // Trigger state machine
     localparam ILA_IDLE      = 3'd0;
@@ -159,11 +161,39 @@ module ila (
     localparam ILA_ARMED     = 3'd2;
     localparam ILA_POST_FILL = 3'd3;
     localparam ILA_DONE      = 3'd4;
+    localparam ILA_CANDIDATE = 3'd5; // mode-4 stage 1: ring frozen, confirming
 
     reg [2:0]            ila_state;
     reg [ADDR_WIDTH-1:0] trigger_pos;
     reg [ADDR_WIDTH-1:0] pre_count;
     reg [ADDR_WIDTH-1:0] post_count;
+
+    // Hang detection (trigger mode 4) — TWO-STAGE, board-calibrated 2026-11-02:
+    // A healthy Mac Plus desktop is NOT continuously fetching: the 68k has
+    // frequent /AS-deasserted gaps of >= 12 us (>= 192 samples) between
+    // instruction bursts (live-board canary: a 192-sample silence started
+    // within 15 us of a random arm, in two separate boots). So a single
+    // silence threshold below ~4 ms would false-fire constantly, while one
+    // above ~4 ms would let the 256-sample ring (16.3 us) scroll past the
+    // last CPU activity before firing.
+    //
+    // Stage 1 (candidate): HANG_CAND = 192 consecutive /AS-high samples
+    //   -> FREEZE the ring (stop writing) and record where the last CPU bus
+    //   cycle is (HANG_CAND samples back). A false candidate is HARMLESS:
+    //   the ring simply stops scrolling until the CPU returns, then resumes
+    //   overwriting from the same pointer.
+    // Stage 2 (confirm):  HANG_CONF = 60000 samples = 3.84 ms of total bus
+    //   silence (16-bit quiet_cnt max = 65535 = 4.19 ms). A healthy System 6
+    //   CPU is released from WAIT by the ~1 ms VIA timer tick, so no healthy
+    //   silence exceeds ~1-2 ms. 3.84 ms = hard hang.
+    // On confirm: state -> DONE, ring holds the frozen 256 samples = the last
+    // 16.3 us, with the LAST CPU bus cycle at trigger_pos (index 0 after the
+    // host rotation) and 63 samples (~4 us) of pre-hang CPU activity before it.
+    localparam [15:0] HANG_CAND = 16'd192;
+    localparam [15:0] HANG_CONF = 16'd60000;
+    reg [15:0] quiet_cnt;
+    wire         hang_candidate = (quiet_cnt >= HANG_CAND);
+    wire         hang_confirmed = (quiet_cnt >= HANG_CONF);
 
     // Trigger configuration
     reg [2:0]  trig_mode;       // 0=Manual, 1=AS low, 2=DTACK low, 3=Addr match, 4=RAM collision
@@ -176,10 +206,19 @@ module ila (
     reg        force_trig_req;
 
     // Trigger condition evaluation
-    wire [23:0] cpu_addr = probes[55:32];
-    wire _as             = probes[6];
-    wire _dtack          = probes[10];
-    wire ram_collision   = probes[19] && probes[15] && (probes[16] || probes[17]); // RAM access during video/audio DMA
+    // Probe map v2 (top.sv ila_probes, 2026-10-31):
+    //   [63:56] sdram_dout[15:8]   data byte
+    //   [55:32] cpuAddr[23:0]      CPU logical address (trigger + context)
+    //   [31:11] sdram_rd_addr[20:0]  real SDRAM word address the FSM serviced
+    //   [10] turbo_active  [9] cache_hit  [8] cache_en
+    //   [7] _cpuAS  [6] _cpuRW  [5] selectRAM  [4] selectROM
+    //   [3] loadPixels  [2] loadSound  [1] videoBusControl  [0] cpuBusControl
+    wire [23:0] cpu_addr    = probes[55:32];
+    wire        _as         = probes[7];
+    wire        _dtack      = 1'b1; // DTACK not probed in v2 -> mode 2 = force only
+    wire        selectRAM   = probes[5];
+    wire        dma_active  = probes[3] || probes[2]; // loadPixels || loadSound
+    wire ram_collision      = selectRAM && dma_active; // CPU RAM cycle while video/audio DMA owns SDRAM
 
     wire addr_match = ((cpu_addr & trig_mask) == (trig_addr & trig_mask));
 
@@ -188,9 +227,13 @@ module ila (
         case (trig_mode)
             3'd0: trigger_hit = force_trigger;
             3'd1: trigger_hit = force_trigger || !_as;
-            3'd2: trigger_hit = force_trigger || (!_as && !_dtack);
+            3'd2: trigger_hit = force_trigger || (!_as && ram_collision); // CPU RAM read during video/audio DMA
             3'd3: trigger_hit = force_trigger || (!_as && addr_match);
-            3'd4: trigger_hit = force_trigger || ram_collision;
+            // Mode 4 never "fires" via trigger_hit: its two-stage candidate /
+            // confirm sequence is handled in the state machine below, because
+            // a hang must freeze the ring BEFORE confirming (a single-level
+            // trigger would let the ring scroll past the last CPU cycle).
+            3'd4: trigger_hit = force_trigger;
             default: trigger_hit = force_trigger;
         endcase
     end
@@ -204,6 +247,7 @@ module ila (
             post_count    <= 0;
             trigger_pos   <= 0;
             force_trigger <= 1'b0;
+            quiet_cnt     <= 16'd0;
         end else if (ila_arm_req || uart_arm_req) begin
             ila_state     <= ILA_ARM_PRE;
             wr_ptr        <= 0;
@@ -211,11 +255,21 @@ module ila (
             post_count    <= 0;
             trigger_pos   <= 0;
             force_trigger <= 1'b0;
+            quiet_cnt     <= 16'd0;
         end else begin
             if (force_trig_req || uart_force_trig_req)
                 force_trigger <= 1'b1;
             else if (force_trigger)
                 force_trigger <= 1'b0;
+
+            // Hang detector: consecutive samples with /AS deasserted (CPU
+            // bus silent). Saturation (16'hFFFF = 4.19 ms) is above
+            // HANG_CONF, so the confirm condition is reachable. Any live CPU
+            // cycle resets it.
+            if (_as && quiet_cnt != 16'hFFFF)
+                quiet_cnt <= quiet_cnt + 1'b1;
+            else if (!_as)
+                quiet_cnt <= 16'd0;
 
             case (ila_state)
                 ILA_IDLE: begin
@@ -239,10 +293,38 @@ module ila (
                         wr_ptr <= wr_ptr + 1'b1;
 
                         if (trigger_hit) begin
+                            // Modes 0-3 (and force in any mode)
                             trigger_pos <= wr_ptr;
                             post_count  <= 0;
                             ila_state   <= ILA_POST_FILL;
+                        end else if (trig_mode == 3'd4 && hang_candidate) begin
+                            // Mode-4 stage 1: freeze the ring NOW. trigger_pos
+                            // is deliberately NOT set here: a healthy desktop
+                            // has >=192-sample /AS gaps that enter this state
+                            // and abort, and a stale trigger_pos would make
+                            // the B-dump look like a fire. It is stamped at
+                            // CONFIRM below (wr_ptr is frozen, same value).
+                            post_count  <= 0;
+                            ila_state   <= ILA_CANDIDATE;
                         end
+                    end
+                end
+
+                ILA_CANDIDATE: begin
+                    // Ring is FROZEN. Wait for HANG_CONF of total silence.
+                    // A live CPU cycle (any !_as) aborts the candidate and
+                    // resumes normal scrolling (the frozen ring is harmlessly
+                    // overwritten from the same pointer) leaving
+                    // trigger_pos untouched (0 from arm) -> dump pos=0.
+                    if (!_as)
+                        ila_state <= ILA_ARMED;
+                    else if (hang_confirmed || force_trigger) begin
+                        // Confirmed hang: stamp the position of the LAST CPU
+                        // bus cycle (HANG_CAND samples before the freeze).
+                        // After the host rotation, index 0 = start of the
+                        // hang silence, indices 192..255 = last 64 CPU samples.
+                        trigger_pos <= wr_ptr - HANG_CAND[7:0];
+                        ila_state   <= ILA_DONE;
                     end
                 end
 
@@ -288,8 +370,11 @@ module ila (
             ila_disarm_req  <= 1'b0;
             force_trig_req  <= 1'b0;
         end else begin
-            if (uart_arm_req)
+            if (uart_arm_req) begin
                 trig_mode <= uart_trig_mode;
+                trig_addr <= uart_trig_addr;
+                trig_mask <= uart_trig_mask;
+            end
             if (ice_cmd_strobe)
                 ice_cmd_strobe <= 1'b0;
             if (ila_arm_req)
@@ -450,6 +535,8 @@ module ila (
     wire        uart_disarm_req;
     wire        uart_force_trig_req;
     wire [2:0]  uart_trig_mode;
+    wire [23:0] uart_trig_addr;
+    wire [23:0] uart_trig_mask;
 
     ila_uart #(
         .CLK_FREQ(15667200),
@@ -479,6 +566,8 @@ module ila (
         .uart_disarm_req(uart_disarm_req),
         .uart_force_trig_req(uart_force_trig_req),
         .uart_trig_mode(uart_trig_mode),
+        .uart_trig_addr(uart_trig_addr),
+        .uart_trig_mask(uart_trig_mask),
         .ice_poke_valid(ice_poke_valid),
         .ice_poke_idx(ice_poke_idx),
         .ice_poke_data(ice_poke_data),

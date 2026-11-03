@@ -31,13 +31,18 @@ HDL_FILES+=$(MISC_FILES:%=$(MISC_DIR)/%)
 # NOTE: do NOT pass an empty -CFLAGS to verilator (breaks its option parser)
 ifeq ($(HEADLESS),1)
 EXTRA_CFLAGS =
-EXTRA_CFLAGS_OPT =
 EXTRA_LDFLAGS = -L/opt/homebrew/lib -llz4 -lz
 else
 EXTRA_CFLAGS = `sdl2-config --cflags` -DVIDEO
-EXTRA_CFLAGS_OPT = -CFLAGS "${EXTRA_CFLAGS}"
 EXTRA_LDFLAGS = `sdl2-config --libs` -lSDL2_image
 endif
+
+# DEBUG_MEM=1 -> verbose SDRAM/SRAM model logging (nanomac_tb.cpp #ifdef DEBUG_MEM)
+ifneq ($(DEBUG_MEM),)
+EXTRA_CFLAGS += -DDEBUG_MEM
+endif
+
+EXTRA_CFLAGS_OPT = $(if $(EXTRA_CFLAGS),-CFLAGS "$(EXTRA_CFLAGS)",)
 
 all: $(PRJ)
 

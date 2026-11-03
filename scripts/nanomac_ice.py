@@ -8,10 +8,28 @@ Usage:
     python3 scripts/nanomac_ice.py reset
     python3 scripts/nanomac_ice.py step [N]
     python3 scripts/nanomac_ice.py stepbus
+    python3 scripts/nanomac_ice.py trigset <mode> <addr> <mask>
     python3 scripts/nanomac_ice.py arm
     python3 scripts/nanomac_ice.py trigger
     python3 scripts/nanomac_ice.py dump [--vcd output.vcd]
+    python3 scripts/nanomac_ice.py poke <lo>
+    python3 scripts/nanomac_ice.py poked <lo>
+    python3 scripts/nanomac_ice.py peek
+    python3 scripts/nanomac_ice.py clear
     python3 scripts/nanomac_ice.py interactive
+
+trigset modes: 0=force 1=AS low 2=RAM-dma-collision 3=address match 4=hang detect
+  Modes 1-3 all require _AS LOW (an active CPU bus cycle), so they can NEVER
+  fire on a hard hang (CPU wedged with /AS high). Use mode 4 to catch those:
+    trigset 4        (addr/mask ignored; fires after HANG_THRESH=192 samples
+                       ~12us of total bus silence; the last CPU cycle lands at
+                       rotated index 64 of the dump with ~190 pre-hang samples)
+  Mode 3 address match, mask semantics: bit=1 means CARE, 0 means don't care.
+  e.g. ROM error-spin loop at $4027E8 (16-word window):
+      trigset 3 0x4027E8 0xFFFFF0
+  (Do NOT use $0001B0: it collides with RAM-test data reads of
+   $00xxxx — false positives. The error handler lives in ROM at
+   $400000+$027E8 = $4027E8.)
 """
 
 import sys
@@ -94,53 +112,52 @@ def get_connection(port=None, baud=2000000, timeout=1.0):
 
 def parse_sample(raw_64):
     """
-    Parse a 64-bit ILA probe sample into named signals:
-      [63:56] Data bus (upper 8 bits)
-      [55:32] Address bus (24 bits)
-      [31:29] Spares
-      [28:26] SDRAM phase
-      [25:24] Spares
-      [23:0]  Mac control probes:
-        [22] RAM chip select
-        [21] VIA chip select
-        [20] ROM chip select
-        [19] RAM request
-        [10] _cpuDTACK
-        [9]  cpuRW
-        [6]  _cpuAS
-        [5]  Turbo mode active
-        [4:0] Bus cycle / phase
+    Parse a 64-bit ILA probe sample into named signals (probe map v2, 2026-10-31):
+      [63:56] data byte (sdram_dout[15:8])
+      [55:32] CPU logical address (24 bits)
+      [31:11] sdram_rd_addr[20:0]  real SDRAM word address the FSM serviced
+      [10]    turbo_active
+      [9]     cache_hit   [8] cache_en
+      [7]     _cpuAS
+      [6]     _cpuRW (1=READ)
+      [5]     selectRAM   [4] selectROM
+      [3]     loadPixels  [2] loadSound   (video/audio DMA reads of SDRAM)
+      [1]     videoBusControl   [0] cpuBusControl
+    cpu_rd: derived — the data/addr pair belongs to a CPU access
+    (selectRAM, CPU bus control, and no video/audio DMA in the cycle).
     """
     data = (raw_64 >> 56) & 0xFF
     addr = (raw_64 >> 32) & 0x00FFFFFF
-    phase = (raw_64 >> 26) & 0x7
-    cache_hit = bool(raw_64 & (1 << 25))
-    cache_en  = bool(raw_64 & (1 << 24))
-    ctrl = raw_64 & 0x00FFFFFF
-
-    ram_cs = bool(ctrl & (1 << 22))
-    via_cs = bool(ctrl & (1 << 21))
-    rom_cs = bool(ctrl & (1 << 20))
-    ram_req = bool(ctrl & (1 << 19))
-    dtack = bool(ctrl & (1 << 10))
-    rw = "R" if (ctrl & (1 << 9)) else "W"
-    _as = bool(ctrl & (1 << 6))
-    turbo = bool(ctrl & (1 << 5))
+    sdram_addr = (raw_64 >> 11) & 0x1FFFFF
+    turbo = bool(raw_64 & (1 << 10))
+    cache_hit = bool(raw_64 & (1 << 9))
+    cache_en  = bool(raw_64 & (1 << 8))
+    _as = bool(raw_64 & (1 << 7))
+    rw = "R" if (raw_64 & (1 << 6)) else "W"
+    ram_cs = bool(raw_64 & (1 << 5))
+    rom_cs = bool(raw_64 & (1 << 4))
+    load_px = bool(raw_64 & (1 << 3))
+    load_snd = bool(raw_64 & (1 << 2))
+    vid_bm = bool(raw_64 & (1 << 1))
+    cpu_bm = bool(raw_64 & (1 << 0))
+    cpu_rd = ram_cs and cpu_bm and not load_px and not load_snd
 
     return {
         "addr": addr,
         "data": data,
-        "phase": phase,
-        "ram_cs": ram_cs,
-        "via_cs": via_cs,
-        "rom_cs": rom_cs,
-        "ram_req": ram_req,
-        "dtack": dtack,
-        "rw": rw,
-        "_as": _as,
+        "sdram_addr": sdram_addr,
         "turbo": turbo,
         "cache_hit": cache_hit,
         "cache_en": cache_en,
+        "_as": _as,
+        "rw": rw,
+        "ram_cs": ram_cs,
+        "rom_cs": rom_cs,
+        "load_px": load_px,
+        "load_snd": load_snd,
+        "vid_bm": vid_bm,
+        "cpu_bm": cpu_bm,
+        "cpu_rd": cpu_rd,
     }
 
 
@@ -208,6 +225,18 @@ def cmd_arm(ser):
     print(f"[NanoMac ILA] {resp}")
 
 
+def cmd_trigset(ser, mode, addr, mask):
+    # 't' + mode + addr(3 bytes big-endian) + mask(3 bytes big-endian)
+    payload = (b"t" + bytes([mode & 0x7,
+                             (addr >> 16) & 0xFF, (addr >> 8) & 0xFF, addr & 0xFF,
+                             (mask >> 16) & 0xFF, (mask >> 8) & 0xFF, mask & 0xFF]))
+    ser.reset_input_buffer()
+    ser.write(payload)
+    time.sleep(0.02)
+    print(f"[NanoMac ILA] Trigger set: mode={mode} addr=0x{addr:06X} mask=0x{mask:06X} "
+          f"(applies on next 'arm')")
+
+
 def cmd_trigger(ser):
     ser.reset_input_buffer()
     ser.write(b"A")
@@ -219,29 +248,45 @@ def cmd_dump_binary(ser, vcd_filename=None):
     ser.reset_input_buffer()
     ser.write(b"B")
 
-    # Read 2048 bytes (256 samples * 8 bytes) — ILA trimmed to 256 samples
-    raw = ser.read(2048)
-    if len(raw) < 2048:
-        print(f"Warning: Expected 2048 bytes, received {len(raw)} bytes.")
+    # Read 2049 bytes: 1 trigger-position header byte + 2048 (256 samples * 8 bytes)
+    raw = ser.read(2049)
+    if len(raw) < 2049:
+        print(f"Warning: Expected 2049 bytes, received {len(raw)} bytes.")
+        # fall back to no-header interpretation if the old firmware is still running
+        raw = raw[-2048:] if len(raw) >= 2048 else raw
 
-    samples = []
-    for i in range(0, len(raw), 8):
-        sample_bytes = raw[i : i + 8]
-        if len(sample_bytes) == 8:
-            val = int.from_bytes(sample_bytes, byteorder="little")
+    # If a header byte is present, rotate the circular buffer so that the
+    # trigger point (where the trigger condition first held) is sample 0.
+    # Header byte is an 8-bit wraparound counter, so wrap-aware rotate.
+    if len(raw) >= 2049:
+        trig_pos = raw[0] & 0xFF
+        raw = raw[1:]
+        n = (len(raw) - (len(raw) % 8)) // 8
+        samples = []
+        for i in range(n):
+            # circular index: trigger sample is at raw position trig_pos
+            idx = (trig_pos + i) % n
+            val = int.from_bytes(raw[idx * 8 : idx * 8 + 8], byteorder="little")
             samples.append(parse_sample(val))
-
-    print(f"Captured {len(samples)} trace samples.")
+        print(f"Captured {len(samples)} trace samples (trigger at sample 0, pos={trig_pos}).")
+    else:
+        samples = []
+        for i in range(0, len(raw), 8):
+            sample_bytes = raw[i : i + 8]
+            if len(sample_bytes) == 8:
+                val = int.from_bytes(sample_bytes, byteorder="little")
+                samples.append(parse_sample(val))
+        print(f"Captured {len(samples)} trace samples (no trigger-position header).")
 
     if vcd_filename:
         write_vcd(samples, vcd_filename)
         print(f"Exported GTKWave trace to: {vcd_filename}")
     else:
-        print(f"{'SMPL':<4} {'ADDR':<8} {'DATA':<4} {'RW':<3} {'AS':<3} {'DTACK':<5} {'RAM':<4} {'ROM':<4} {'PH':<3} {'TURBO':<5} {'C$HIT':<5} {'C$EN':<5}")
-        print("-" * 70)
+        print(f"{'SMPL':<4} {'CADDR':<8} {'DATA':<4} {'SADDR':<7} {'RW':<3} {'AS':<3} {'RAM':<4} {'ROM':<4} {'CPU':<4} {'PX':<3} {'SND':<4} {'TR':<3} {'C$HIT':<5} {'C$EN':<5}")
+        print("-" * 100)
         for i, s in enumerate(samples[:64]):
             print(
-                f"{i:03d}  {s['addr']:06X}   {s['data']:02X}   {s['rw']:<3} {int(s['_as']):<3} {int(s['dtack']):<5} {int(s['ram_cs']):<4} {int(s['rom_cs']):<4} {s['phase']:<3} {int(s['turbo']):<5} {int(s['cache_hit']):<5} {int(s['cache_en']):<5}"
+                f"{i:03d}  {s['addr']:06X}   {s['data']:02X}   {s['sdram_addr']:06X} {s['rw']:<3} {int(s['_as']):<3} {int(s['ram_cs']):<4} {int(s['rom_cs']):<4} {int(s['cpu_rd']):<4} {int(s['load_px']):<3} {int(s['load_snd']):<4} {int(s['turbo']):<3} {int(s['cache_hit']):<5} {int(s['cache_en']):<5}"
             )
         if len(samples) > 64:
             print(f"... and {len(samples) - 64} more samples. Pass --vcd <file.vcd> to view in GTKWave.")
@@ -250,18 +295,22 @@ def cmd_dump_binary(ser, vcd_filename=None):
 def write_vcd(samples, filename):
     with open(filename, "w") as f:
         f.write("$date\n  " + time.asctime() + "\n$end\n")
-        f.write("$version\n  NanoMac ILA\n$end\n")
-        f.write("$timescale\n  10ns\n$end\n")
+        f.write("$version\n  NanoMac ILA v2\n$end\n")
+        f.write("$timescale\n  64ns\n$end\n")
         f.write("$scope module nanomac_ila $end\n")
-        f.write("$var wire 24 a addr [23:0] $end\n")
+        f.write("$var wire 24 a cpu_addr [23:0] $end\n")
         f.write("$var wire 8 d data [7:0] $end\n")
+        f.write("$var wire 21 s sdram_addr [20:0] $end\n")
         f.write("$var wire 1 w rw $end\n")
-        f.write("$var wire 1 s as $end\n")
-        f.write("$var wire 1 k dtack $end\n")
+        f.write("$var wire 1 z as $end\n")
         f.write("$var wire 1 r ram_cs $end\n")
         f.write("$var wire 1 o rom_cs $end\n")
-        f.write("$var wire 3 p phase [2:0] $end\n")
+        f.write("$var wire 1 q cpu_rd $end\n")
         f.write("$var wire 1 t turbo $end\n")
+        f.write("$var wire 1 h cache_hit $end\n")
+        f.write("$var wire 1 e cache_en $end\n")
+        f.write("$var wire 1 g loadPixels $end\n")
+        f.write("$var wire 1 f loadSound $end\n")
         f.write("$upscope $end\n")
         f.write("$enddefinitions $end\n")
 
@@ -269,21 +318,27 @@ def write_vcd(samples, filename):
             f.write(f"#{t}\n")
             f.write(f"b{s['addr']:024b} a\n")
             f.write(f"b{s['data']:08b} d\n")
+            f.write(f"b{s['sdram_addr']:021b} s\n")
             f.write(f"{1 if s['rw'] == 'R' else 0}w\n")
-            f.write(f"{1 if s['_as'] else 0}s\n")
-            f.write(f"{1 if s['dtack'] else 0}k\n")
+            f.write(f"{1 if s['_as'] else 0}z\n")
             f.write(f"{1 if s['ram_cs'] else 0}r\n")
             f.write(f"{1 if s['rom_cs'] else 0}o\n")
-            f.write(f"b{s['phase']:03b} p\n")
+            f.write(f"{1 if s['cpu_rd'] else 0}q\n")
             f.write(f"{1 if s['turbo'] else 0}t\n")
+            f.write(f"{1 if s['cache_hit'] else 0}h\n")
+            f.write(f"{1 if s['cache_en'] else 0}e\n")
+            f.write(f"{1 if s['load_px'] else 0}g\n")
+            f.write(f"{1 if s['load_snd'] else 0}f\n")
 
 
 def main():
     parser = argparse.ArgumentParser(description="NanoMac ILA & ICE Debugger")
     parser.add_argument("--port", help="Serial port (default: auto-detect)")
     parser.add_argument("--baud", type=int, default=2000000, help="Baud rate (default: 2000000)")
-    parser.add_argument("command", choices=["state", "halt", "resume", "reset", "step", "stepbus", "arm", "trigger", "dump", "interactive", "poke", "peek", "clear"])
-    parser.add_argument("count", nargs="?", type=int, default=1, help="Step count")
+    parser.add_argument("command", choices=["state", "halt", "resume", "reset", "step", "stepbus", "trigset", "arm", "trigger", "dump", "interactive", "poke", "poked", "peek", "clear"])
+    parser.add_argument("count", nargs="?", type=lambda s: int(s, 0), default=1, help="Step count / poke value / trigset mode (decimal or 0x-hex)")
+    parser.add_argument("addr", nargs="?", type=lambda s: int(s, 0), default=0x0001B0, help="trigset: trigger address (default 0x0001B0)")
+    parser.add_argument("mask", nargs="?", type=lambda s: int(s, 0), default=0xFFFFFF, help="trigset: address mask, 1=cared (default 0xFFFFFF)")
     parser.add_argument("--vcd", help="Save dump to VCD file for GTKWave")
 
     args = parser.parse_args()
@@ -301,6 +356,8 @@ def main():
         cmd_step(ser, args.count)
     elif args.command == "stepbus":
         cmd_stepbus(ser, args.count)
+    elif args.command == "trigset":
+        cmd_trigset(ser, args.count & 0x7, args.addr & 0xFFFFFF, args.mask & 0xFFFFFF)
     elif args.command == "arm":
         cmd_arm(ser)
     elif args.command == "trigger":
@@ -317,6 +374,14 @@ def main():
         time.sleep(0.05)
         resp = ser.read(64).decode("utf-8", errors="replace").strip()
         print(f"[NanoMac ICE] Poked $F80008 lo=0x{lo:02X} (fillph phase={4 + ((lo >> 4) & 3)}) {resp}")
+    elif args.command == "poked":
+        # poke the $F80004 identity word (idx 1): expected back-read 0x0001
+        lo = (args.count & 0xFF)
+        ser.reset_input_buffer()
+        ser.write(b"T" + bytes([0x00, lo]))
+        time.sleep(0.05)
+        resp = ser.read(64).decode("utf-8", errors="replace").strip()
+        print(f"[NanoMac ICE] Poked $F80004 lo=0x{lo:02X} {resp}")
     elif args.command == "clear":
         # clear cache stat counters (hits/misses/fills)
         ser.reset_input_buffer()

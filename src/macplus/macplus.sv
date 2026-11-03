@@ -98,6 +98,8 @@ module macplus
 	output		       _cpuAS_probe,
 	output		       cache_hit_probe,   // ILA: 1 when cache hit in progress
 	output		       cache_en_probe,    // ILA: 1 when cache is enabled
+	output		       osd_cache_probe,   // ILA: raw configCache from OSD/MCU
+	output		       cache_sweep_probe, // ILA: 1 while tag invalidation sweep runs
 	output [15:0]	       cache_data_dbg,  // debug/tb: word currently served by cache
 	output [15:0]	       cpu_data_in_dbg, // debug/tb: CPU data in (for oracle cross-check)
 	output [15:0]	       cache_hits,      // stat: cache hits since last clear
@@ -291,6 +293,8 @@ assign enPhi2_raw = gen_enPhi2;
 assign      _cpuAS_probe = _cpuAS;
 assign      cache_hit_probe = cache_hit;
 assign      cache_en_probe  = cache_cacheable;
+assign      osd_cache_probe   = configCache;
+assign      cache_sweep_probe = cache_in_sweep;
 
 // -------------------------------------------------------------------------
 // VIA 6522 E-Clock Strobe Synchronizer
