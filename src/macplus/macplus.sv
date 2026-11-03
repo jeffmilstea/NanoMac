@@ -100,6 +100,7 @@ module macplus
 	output		       cache_en_probe,    // ILA: 1 when cache is enabled
 	output		       osd_cache_probe,   // ILA: raw configCache from OSD/MCU
 	output		       cache_sweep_probe, // ILA: 1 while tag invalidation sweep runs
+	output		       hw_video_off_probe,// ILA: video/audio DMA disabled (poke bit3)
 	output [15:0]	       cache_data_dbg,  // debug/tb: word currently served by cache
 	output [15:0]	       cpu_data_in_dbg, // debug/tb: CPU data in (for oracle cross-check)
 	output [15:0]	       cache_hits,      // stat: cache hits since last clear
@@ -206,7 +207,7 @@ wire _memoryUDS, _memoryLDS;
 wire vid_alt, loadPixels, _hblank, _vblank;
 wire memoryOverlayOn, selectSCSI, selectSCC, selectIWM, selectVIA, selectRAM, selectROM, selectSEOverlay, selectHardwareRegs;
 wire [15:0] dataControllerDataOut;
-wire hw_turbo_en, hw_turbo_ovr, hw_cache_en;
+wire hw_turbo_en, hw_turbo_ovr, hw_cache_en, hw_video_off;
 wire [1:0] hw_fillph_turbo; // turbo fill phase = 4 + value (00->4 .. 11->7)
 assign hw_turbo_en_o  = hw_turbo_en;
 assign hw_turbo_ovr_o = hw_turbo_ovr;
@@ -218,7 +219,12 @@ wire loadSound;
 // only accept /AS for ram or rom if it comes in phase 2. Don't accept any later as as we would not
 // Memory cycle synchronization for normal and turbo modes
 wire	refreshCycle;
-wire	cpu_slot = cpuBusControl || (!loadPixels && !loadSound && !refreshCycle);
+// Option A (2026-11-03): the CPU RAM access must set ram_req on its OWN
+// phase-2 tick even when that tick falls in a video half (addrController
+// now lets the CPU win the SDRAM fetch slot there, lpx/lsnd gated).
+// Without this, the colliding read would never DTACK in time.
+wire	cpu_mem_acc = selectRAM && !_cpuAS;
+wire	cpu_slot = cpuBusControl || (!loadPixels && !loadSound && !refreshCycle) || cpu_mem_acc;
 
 reg ram_req;
 reg rom_req;
@@ -295,6 +301,7 @@ assign      cache_hit_probe = cache_hit;
 assign      cache_en_probe  = cache_cacheable;
 assign      osd_cache_probe   = configCache;
 assign      cache_sweep_probe = cache_in_sweep;
+assign      hw_video_off_probe = hw_video_off;
 
 // -------------------------------------------------------------------------
 // VIA 6522 E-Clock Strobe Synchronizer
@@ -366,8 +373,8 @@ assign mac_probes = {
     selectROM,           // [20]
     selectRAM,           // [19]
     refreshCycle,        // [18]
-    loadSound,           // [17]
-    loadPixels,          // [16]
+    loadSound_eff,       // [17]
+    loadPixels_eff,      // [16]
     videoBusControl,     // [15]
     cpuBusControl,       // [14]
     cpu_slot,            // [13]
@@ -397,6 +404,13 @@ assign mac_probes = {
 wire cache_in_sweep = (cache_inv_cnt != 11'd0);
 wire        cache_cacheable = (configCache || hw_cache_en) && (selectROM || selectRAM) &&
                               !memoryOverlayOn && !cache_in_sweep;
+
+// Effective video/audio DMA loads after Option-A arbitration (CPU wins)
+// and the hw_video_off test switch. The shifter/audio in dataController
+// must use these: on a collision tick ramDataIn/sdram_do carries the
+// CPU's word, not a video pixel word.
+wire loadPixels_eff = loadPixels && !cpu_mem_acc && !hw_video_off;
+wire loadSound_eff  = loadSound  && !cpu_mem_acc && !hw_video_off;
 
 // CPU RAM write invalidate -> invalidate the line just written.
 // Phase-2 gated pulse (the form proven on the board at 631431f): at
@@ -671,9 +685,10 @@ addrController ac0
 	._romOE(_romOE), 
 	._ramOE(_ramOE), 
 	._ramWE(_ramWE),
-	.videoBusControl(videoBusControl),	
-	.cpuBusControl(cpuBusControl),	
+	.videoBusControl(videoBusControl),
+	.cpuBusControl(cpuBusControl),
 	.cycleReady(busPhase == 3'd7),
+	.video_dma_off(hw_video_off),
 	.selectSCSI(selectSCSI),
 	.selectSCC(selectSCC),
 	.selectIWM(selectIWM),
@@ -743,6 +758,7 @@ dataController #(SCSI_DEVS) dc0
 	.hw_turbo_en(hw_turbo_en),
 	.hw_turbo_ovr(hw_turbo_ovr),
 	.hw_cache_en(hw_cache_en),
+	.hw_video_off(hw_video_off),
 	.hw_fillph_turbo(hw_fillph_turbo),
 	.cache_hits(cache_hits),
 	.cache_misses(cache_misses),
@@ -790,18 +806,18 @@ dataController #(SCSI_DEVS) dc0
 	// rtc unix ticks
 	.timestamp(TIMESTAMP),
 
-	// video
+	// video (effective loads: CPU won the slot / video_dma_off -> no load)
 	._hblank(_hblank),
-	._vblank(_vblank), 
+	._vblank(_vblank),
 	.pixelOut(pixel),
-	.loadPixels(loadPixels),
+	.loadPixels(loadPixels_eff),
 	.vid_alt(vid_alt),
 
 	.memoryOverlayOn(memoryOverlayOn),
 
 	.audioOut(audio),
 	.snd_alt(snd_alt),
-	.loadSound(loadSound),
+	.loadSound(loadSound_eff),
 
 	// floppy disk interface
 	.diskLED(leds)

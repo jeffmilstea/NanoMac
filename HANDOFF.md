@@ -780,6 +780,90 @@ Mechanism (stock mode, single shared phase-2 SDRAM fetch):
    (trigset 3 0x000004 0xFFFFFF) to catch what the original exception
    was (the pre-hang window here only shows the handler tail).
 
+### OPTION A IMPLEMENTED + SIM-VALIDATED (2026-11-03 session)
+- **Deterministic collision TB (sim/tb_ramwin.sv)**: real clocks +
+  addrDecoder + videoTimer + addrController + board sdram.v FSM. Fake
+  68k continuous word READ of $00003E (word $00001F) for 2000 ticks,
+  then CPU idle 2000. 4MB identity mapping. Checks every phase-2
+  fetch the FSM issues (rd_addr latched 1 cycle later) against the
+  expected owner (CPU word / videoAddr / audioAddr).
+  - UNFIXED: `cpu-fetches=125 ok=75 / 50 MISMATCHES (all video word
+    1f939x, lp=1)` -> bug reproduced. video-only=127 ok, audio=3 ok.
+  - FIXED:  `cpu-fetches=125 ok=125, video=127 ok, audio=3 ok,
+    MISMATCHES=0, RESULT: PASS`.
+  - Build: verilator -j 4 --timing --binary -Wno-lint -Wno-fatal
+    -top-module tb_ramwin -Mdir obj_ramwin <clocks/addrDecoder/
+    videoTimer/addrController>.v ../src/tang/nano20k/sdram.v tb_ramwin.sv
+  - NOTE: tb MUST connect .phase(phase) to the sdram FSM (I forgot
+    once; FSM stays in IDLE, rd_addr stuck 0).
+- **Changes (working tree, sim-validated, NOT yet built for FPGA):**
+  - addrController.v: Option A core. cpu_mem_acc = selectRAM && !_cpuAS;
+    lpx = loadPixels && !cpu_mem_acc && !video_dma_off;
+    lsnd = loadSound && !cpu_mem_acc && !video_dma_off; used in
+    va_ram_access, cpu_ram_access, _ramOE/_ramWE, addrMux.
+    New input `video_dma_off` (hw_video_off poke bit3).
+  - macplus.sv: cpu_slot gains `|| cpu_mem_acc` (so ram_req IS set on
+    the colliding phase-2 tick -> DTACK + fill on that cycle);
+    loadPixels_eff/loadSound_eff = <raw> && !cpu_mem_acc &&
+    !hw_video_off -> dataController shifter/audio (prevents loading
+    the CPU word into the pixel line); mac_probes[17:16] now show the
+    EFFECTIVE loads; new out hw_video_off_probe; dc0 gets
+    .hw_video_off(hw_video_off); ac0 gets .video_dma_off(hw_video_off).
+  - dataController.sv: new hw_video_off reg ($F80008 bit3, poke; RO
+    mirror bit11; status readout widened 5'd0->4'd0+bit11).
+  - top.sv: PROBE MAP v3 (2026-11-03): [63]ram_req (mac_probes[11]),
+    [62]cache_sweep, [61]cache_en_cfg (macplus.cache_en_cfg),
+    [60]hw_video_off, [59:56]reserved (sacrificed sdram_dout byte).
+    [55:32]..[0] unchanged from v2 (cpuAddr still [55:32]).
+  - ila_uart.sv: 's' state line now "A:xxxxxx Q:x" (Q = [63:60]
+    flags nibble {ram_req,sweep,cen,vidoff}) instead of "D:xx".
+  - scripts/nanomac_ice.py: parse_sample v3 (ram_req/sweep/cen_cfg/
+    video_off), VCD gets RQ/SW/CE/VO, poke printout shows
+    turbo/ovr/cache/video_off. PY_COMPILE OK.
+- **Full-machine regression (Verilator, HEADLESS):**
+  - ./nanomac --cache 1 --fastboot 0: boots to desktop, ORACLE
+    bad=0, hits ~21.8M/20s, diagPh6NoHit=0. (The stray
+    "RAM read mismatch @0007fbd4/000fac.." lines are the tb's
+    sram-vs-sdram cross-check firing during RAM-test pattern
+    windows - present in ALL prior baselines too, not a fault;
+    ORACLE bad=0 is the verdict.)
+  - ./nanomac --cache 0 --fastboot 0: bad=0, healthy.
+  - Standalone ILA hang TB (ila_hang_tb.sv) re-run after ila_uart
+    edit: ALL PASS (healthy gaps abort, hang 61000 -> DONE pos=245).
+- **STILL TO DO (next session):**
+  1. FPGA build: cd src && bash build.sh  (gw_sh; GIT_HASH fallback
+     0xDEAD if -verilog_define warning persists - known, non-fatal).
+  2. bash scripts/flash_board.sh src/impl/pnr/nanomac.fs -f
+     then POWER CYCLE.
+  3. Board validation sequence (keyboard-free):
+     a. OSD Cache OFF + stock, boot clean, settle 60s.
+     b. SETTLED canary: trigset 4 + arm + 30s + dump -> pos=0.
+     c. poke 4 (cache on, video ON) -> expect freeze 60-110s on
+        OLD build; on this build expect NO freeze. If it still
+        freezes: dump --vcd (v3 map shows ram_req at last cycle).
+     d. ICE 'R' (clears hw regs), poke 12 (cache on, video DMA OFF)
+        -> 5+ min must stay healthy (display-off confirmation;
+        THIS is the corrected step 1 of the old plan).
+     e. Optional Q1: trigset 3 0x000004 0xFFFFFF to catch the first
+        vector write = original exception.
+  4. If board green: Speedometer 3-iter sieve comparison
+     (stock+cache 14.0M cycles/iter baseline) + cache counters
+     (clear/peek window).
+- **RISK NOTES (read before declaring victory):**
+  - Option A drops one video pixel word per collision: invisible
+    (next word re-aligns the shifter; at most a 1-word gap in a
+    512-word line) but has NEVER been exercised on the board.
+  - The poisoned-read path (outcome i) and the fill-drop path
+    (outcome ii) are both closed by the same fix, but the
+    FIRST-EXCEPTION origin (Q1) may be a different bug that the
+    handler was logging - the freeze could recur via that path.
+    The v3 probe + poke-12 test discriminate.
+  - turbo mode still has the known phase-2 wr-invalidate gap
+    (documented under "Bisect plan"); Option A's cpu_mem_acc is
+    phase-agnostic (level, not phase) so it should also protect
+    turbo reads, but turbo was not re-validated in sim this session
+    (sim CLKCPU is phase-locked; no drift).
+
 ### FIX DIRECTION (NOT implemented; follow validate-in-sim-first rule)
 Preferred (Option A): CPU access wins the phase-2 SDRAM slot - suppress
 video pixel fetch on any phase-2 tick where a CPU RAM/ROM access is
@@ -804,6 +888,96 @@ the miss (retry next slot). Masks, does not fix poisoned cache-off reads.
   yet traced. Low priority - the chipset-side dropped read is the
   proven fault.
 
+## 2026-11-03 (session: Option A implementation) — PLAN + CORRECTIONS
+
+### ⚠️ CORRECTION: the "display-off poke 4" confirmation test is INVALID
+- There is NO OSD "video off" option. sysctrl.v CMD4 config IDs:
+  R(reset) Y(memory) V(volume) W(floppy-prot) X(video MODE: 720p/wide/
+  native) T(turbo) S(hdd-prot) F(fastboot) C(cache) M(serial). All video
+  modes run the video DMA.
+- Unplugging HDMI does NOT stop the video DMA: loadPixels
+  (videoTimer.v:63) is driven purely by the internal xpos/_vblank/
+  videoCycle counters — independent of HDMI/EDID/display state. SDRAM
+  keeps being fetched for the framebuffer with no display attached.
+- Therefore "display off + poke 4" would still run the video/CPU
+  collision. To make a valid no-video test, add a real video-DMA off
+  switch: new poke bit 3 in the $F80008 control word = hw_video_off
+  (gates loadPixels/loadSound into addrController + dataController
+  shifter/audio). Test pokes:
+    poke 4  (0x04) = cache ON, video ON   -> expect freeze 60-110s
+    poke 12 (0x0C) = cache ON, video DMA OFF -> expect NO freeze (5min+)
+  (ICE 'R' reset between the two — it clears the hw regs.)
+
+### Mechanism confirmed in code this session (board RTL, exact lines)
+- sdram.v:153-165 — FSM in STATE_IDLE accepts a request ONLY at
+  phase==2: (oe||we) -> CMD_ACTIVE (row latch, rd_addr_r<=addr) else
+  CMD_AUTO_REFRESH. Exactly ONE fetch per phase-2 tick, no queue.
+- addrController.v:108 — addrMux = loadPixels?videoAddr :
+  loadSound?audioAddr : cpuAddr[21:1]. Video/audio win the address mux;
+  _ramOE (line 101) also asserts for va_ram_access.
+- macplus.sv:221 — cpu_slot = cpuBusControl || (!loadPixels &&
+  !loadSound && !refreshCycle); ram_req set only at busPhase==2 &&
+  selectRAM && cpu_slot (line 238) -> in a video half-slot a CPU RAM
+  read gets NO fetch slot and no ram_req -> data path serves
+  sdram_do = video word (doutD) -> 68k latches video data as if it
+  were the vector (poisoned read, outcome (i)).
+- fx68k cross-check (src/fx68k/fx68k.sv): busEnd = ~rDtack | iStop
+  (line 2355); iStop only via xVma/(Vpai&(iAddrErr|~rBerr)) (line
+  575-576) — no data-missing abort path, so the poisoned read
+  completes "normally" and the CPU chokes on the NEXT fetch (Q3).
+  dataIo latches iEdb at the next T4 (line 1777-1785) — consistent
+  with data being latched from phase-6-valid sdram_do.
+- Why the sim never reproduces: nanomac_tb.v:181 ties .CLKCPU(clk) —
+  the 68k is phase-locked to the phase grid, so /AS can never drift
+  onto the colliding tick the way the board's 2.5:1 drift does.
+  (The earlier "mock SDRAM" note in this doc is inaccurate: the sim
+  DOES instantiate the real board sdram.v FSM — TANG_FILES in
+  sim/Makefile. What masks the poison is the C++ SRAM model
+  (nanomac_tb.cpp:598-638): it serves ram[ram_addr] directly at
+  phase 6, so even a poisoned cycle hands the CPU the right word,
+  and the dual-implementation cross-check (line 632) only compares
+  against the FSM when the FSM actually read.)
+
+### Option A implementation (this session)
+- addrController.v: gate the video/audio SDRAM fetch while a CPU RAM
+  access is address-valid: cpu_mem_acc = selectRAM && !_cpuAS;
+  lpx = loadPixels && !cpu_mem_acc; lsnd = loadSound && !cpu_mem_acc;
+  used in va_ram_access, cpu_ram_access, addrMux. (CPU read AND
+  write now win the slot; a skipped video pixel word / audio byte
+  is invisible.)
+- macplus.sv: companion change — cpu_slot gains `|| (selectRAM &&
+  !_cpuAS)` so ram_req IS set on the colliding phase-2 tick ->
+  DTACK in the first E-cycle and the fill fires on that cycle;
+  shifter + audio get the gated load signals (videoShifter must not
+  load the CPU word into the pixel line); mac_probes use gated
+  loadPixels/loadSound so the ILA shows the effective bus state.
+- dataController.sv: new hw_video_off reg ($F80008 bit 3, poke),
+  RO bit 11 in the status readout; macplus gates loadPixels/
+  loadSound with !hw_video_off before ac0/dc0 (the valid
+  "display-off" test enabler).
+- ILA probe v3 (top.sv): [63:56] now {ram_req, cache_in_sweep,
+  cache_en_cfg, hw_video_off, 4'b0} (sacrifices the sdram_dout byte
+  [63:56] per plan); ila_uart 's' snapshot format and
+  scripts/nanomac_ice.py parse_sample updated.
+- Sim validation:
+  (a) deterministic collision TB (sim/tb_ramwin.v): real clocks +
+      addrDecoder + videoTimer + addrController + sdram FSM, fake
+      CPU asserts a RAM read timed to a video-half phase-2 tick.
+      UNFIXED: rd_addr = video word (bug reproduced). FIXED:
+      rd_addr = CPU word, video fetches unaffected when no CPU
+      access.
+  (b) full-machine regression: ./nanomac --cache 1 --fastboot 0
+      must stay bad=0 + boots (cache off baseline too).
+- Board plan (needs user, after build+flash):
+  1. Power cycle, OSD Cache OFF (recover the frozen board).
+  2. Settled desktop: trigset 4 + arm + 30s + dump -> pos=0 canary.
+  3. poke 4 (cache on, video on) -> freeze -> dump --vcd (v3 map:
+     last CPU cycle now shows ram_req directly).
+  4. ICE 'R' reset, poke 12 (cache on, video DMA off) -> 5+ min,
+     no freeze => video-collision root cause CONFIRMED.
+  5. (Optional) trigset 3 0x000004 0xFFFFFF to catch the FIRST
+     vector write = the original exception (Q1).
+
 ## Clocks/phase reference (stock mode)
 
 clk_sys=clk_pixel=15.6672MHz; 8 phases per E-cycle; /AS low from phase 2;
@@ -821,3 +995,25 @@ ILA: clk_pixel, 256x64 trace, probe map v2 (see "Probe map v2" above;
 - Debug protocol: hypothesize → validate with evidence → confirm with user before fixing.
 - Timing report violations are a red herring (SDC only constrains clk_osc).
 - context limit 262k; this handoff doc is the recovery point.
+
+## FRESH-SESSION PROMPT (paste as first message 2026-11-03+)
+Read HANDOFF.md esp. "OPTION A IMPLEMENTED + SIM-VALIDATED" and the
+2026-11-03 sections. State: Option A (CPU wins the phase-2 SDRAM slot)
+is implemented in the working tree and SIM-VALIDATED (sim/tb_ramwin.sv:
+unfixed=50/125 CPU fetches stolen -> fixed=0 mismatches; full-machine
+regression cache on/off bad=0; ILA hang TB all-PASS). NOT yet built/
+flashed. Board is still FROZEN from the poke-4 freeze of the previous
+session (flash #4 in SPI). Next: (1) FPGA build `cd src && bash
+build.sh` then `bash scripts/flash_board.sh src/impl/pnr/nanomac.fs -f`
++ POWER CYCLE (recover: OSD Cache OFF, stock), (2) settled canary
+(trigset 4, arm, 30s, dump -> pos=0), (3) poke 4 -> expect NO freeze
+this time; if it freezes, dump --vcd (probe map v3 shows ram_req),
+(4) ICE 'R' + poke 12 (cache on, video DMA OFF via new hw_video_off
+bit3) -> 5+ min healthy = display-off confirmation (the corrected
+step 1: there is NO OSD video-off and unplugging HDMI does not stop
+the DMA - that's why hw_video_off exists), (5) optional Q1: trigset 3
+0x000004 0xFFFFFF for the first vector write, (6) if green:
+Speedometer 3-iter sieve vs 14.0M cycles/iter baseline + clear/peek
+counter window. See "RISK NOTES" in the OPTION A section before
+declaring victory (first-exception origin Q1 may be a separate bug;
+turbo not re-validated in sim this session).

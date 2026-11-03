@@ -766,10 +766,13 @@ end
                 end
 
                 // -------------------------------------------------------------
-                // Print single formatted 64-bit state line (probe map v2)
-                // Format: "A:xxxxxx D:xx RW:x AS:x RM:x RO:x TR:x SA:xxxx\r\n"
-                //   A = cpuAddr[23:0]  D = data byte  RW/AS = CPU bus  RM/RO = selectRAM/ROM
+                // Print single formatted 64-bit state line (probe map v3)
+                // Format: "A:xxxxxx Q:xxxx RW:x AS:x RM:x RO:x TR:x SA:xxxx\r\n"
+                //   A = cpuAddr[23:0]  Q = [63:60] = {ram_req, sweep, cache_en_cfg,
+                //       video_off}  RW/AS = CPU bus  RM/RO = selectRAM/ROM
                 //   TR = turbo active  SA = sdram_rd_addr[15:0] (real SDRAM word addr)
+                //   (probe map v3 replaced the v2 sdram_dout data byte with the
+                //    arbitration/fill diagnostics)
                 // -------------------------------------------------------------
                                 S_PRINT_STAT: begin
                     if (fifo_has_room) begin
@@ -787,9 +790,9 @@ end
                             8:  fifo_din <= hex2ascii(sample_latch[39:36]);
                             9:  fifo_din <= hex2ascii(sample_latch[35:32]);
                             10: fifo_din <= " ";
-                            11: fifo_din <= "D";
+                            11: fifo_din <= "Q";
                             12: fifo_din <= ":";
-                            13: fifo_din <= hex2ascii(sample_latch[63:60]);
+                            13: fifo_din <= hex2ascii(sample_latch[63:60]); // Q = flags nibble
                             14: fifo_din <= hex2ascii(sample_latch[59:56]);
                             15: fifo_din <= " ";
                             16: fifo_din <= "R";

@@ -112,8 +112,13 @@ def get_connection(port=None, baud=2000000, timeout=1.0):
 
 def parse_sample(raw_64):
     """
-    Parse a 64-bit ILA probe sample into named signals (probe map v2, 2026-10-31):
-      [63:56] data byte (sdram_dout[15:8])
+    Parse a 64-bit ILA probe sample into named signals (probe map v3, 2026-11-03):
+      [63]    ram_req        CPU RAM request latched for this E-cycle
+                            (0 on a colliding phase-2 tick = slot not requested)
+      [62]    cache_sweep    tag-invalidation sweep in progress
+      [61]    cache_en_cfg   configCache || hw_cache_en
+      [60]    video_off      video/audio DMA disabled (poke $F80008 bit3)
+      [59:56] reserved (v2 sdram_dout data byte - sacrificed in v3)
       [55:32] CPU logical address (24 bits)
       [31:11] sdram_rd_addr[20:0]  real SDRAM word address the FSM serviced
       [10]    turbo_active
@@ -125,8 +130,15 @@ def parse_sample(raw_64):
       [1]     videoBusControl   [0] cpuBusControl
     cpu_rd: derived — the data/addr pair belongs to a CPU access
     (selectRAM, CPU bus control, and no video/audio DMA in the cycle).
+    Note: on OLD (v2) firmware the [63:56] nibble was the sdram_dout byte;
+    v3 shows it as Q. decode_state_lines flags v2 lines via the format.
     """
-    data = (raw_64 >> 56) & 0xFF
+    flags = (raw_64 >> 56) & 0xFF
+    ram_req   = bool(raw_64 & (1 << 63))
+    sweep     = bool(raw_64 & (1 << 62))
+    cen_cfg   = bool(raw_64 & (1 << 61))
+    video_off = bool(raw_64 & (1 << 60))
+    data = flags & 0x0F  # v3: reserved (v2: lower data byte)
     addr = (raw_64 >> 32) & 0x00FFFFFF
     sdram_addr = (raw_64 >> 11) & 0x1FFFFF
     turbo = bool(raw_64 & (1 << 10))
@@ -145,6 +157,10 @@ def parse_sample(raw_64):
     return {
         "addr": addr,
         "data": data,
+        "ram_req": ram_req,
+        "sweep": sweep,
+        "cen_cfg": cen_cfg,
+        "video_off": video_off,
         "sdram_addr": sdram_addr,
         "turbo": turbo,
         "cache_hit": cache_hit,
@@ -311,6 +327,10 @@ def write_vcd(samples, filename):
         f.write("$var wire 1 e cache_en $end\n")
         f.write("$var wire 1 g loadPixels $end\n")
         f.write("$var wire 1 f loadSound $end\n")
+        f.write("$var wire 1 RQ ram_req $end\n")
+        f.write("$var wire 1 SW sweep $end\n")
+        f.write("$var wire 1 CE cen_cfg $end\n")
+        f.write("$var wire 1 VO video_off $end\n")
         f.write("$upscope $end\n")
         f.write("$enddefinitions $end\n")
 
@@ -329,6 +349,10 @@ def write_vcd(samples, filename):
             f.write(f"{1 if s['cache_en'] else 0}e\n")
             f.write(f"{1 if s['load_px'] else 0}g\n")
             f.write(f"{1 if s['load_snd'] else 0}f\n")
+            f.write(f"{1 if s['ram_req'] else 0}RQ\n")
+            f.write(f"{1 if s['sweep'] else 0}SW\n")
+            f.write(f"{1 if s['cen_cfg'] else 0}CE\n")
+            f.write(f"{1 if s['video_off'] else 0}VO\n")
 
 
 def main():
@@ -366,14 +390,18 @@ def main():
         cmd_dump_binary(ser, args.vcd)
     elif args.command == "poke":
         # write $F80008 control word: lo = args.count
-        #   bit0=turbo_en bit1=turbo_ovr bit2=cache_en bits[5:4]=turbo fill phase-4
-        # e.g. 'poke 44' = 0x5544 -> fillph=2 (phase 6), cache on, ovr on
+        #   bit0=turbo_en bit1=turbo_ovr bit2=cache_en bit3=video_off
+        #   bits[5:4]=turbo fill phase-4 (reserved in current RTL)
+        # e.g. 'poke 4'  = cache on (video on)
+        #      'poke 12' = cache on + video DMA off  (valid display-off test)
         ser.reset_input_buffer()
         lo = (args.count & 0xFF) if args.count else 0
         ser.write(b"P" + bytes([0x55, lo]))
         time.sleep(0.05)
         resp = ser.read(64).decode("utf-8", errors="replace").strip()
-        print(f"[NanoMac ICE] Poked $F80008 lo=0x{lo:02X} (fillph phase={4 + ((lo >> 4) & 3)}) {resp}")
+        print(f"[NanoMac ICE] Poked $F80008 lo=0x{lo:02X} "
+              f"(turbo={lo & 1} ovr={(lo >> 1) & 1} cache={(lo >> 2) & 1} "
+              f"video_off={(lo >> 3) & 1}) {resp}")
     elif args.command == "poked":
         # poke the $F80004 identity word (idx 1): expected back-read 0x0001
         lo = (args.count & 0xFF)

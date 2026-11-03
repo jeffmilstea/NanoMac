@@ -40,6 +40,7 @@ module dataController (
 	output reg	       hw_turbo_en,
 	output reg	       hw_turbo_ovr,
 	output reg	       hw_cache_en,
+	output reg	       hw_video_off,     // drop video/audio SDRAM DMA (test)
 	output reg [1:0]    hw_fillph_turbo,  // reserved (fill is now data-valid based)
 	input [15:0]	       cache_hits,    // BRAM cache statistics (RO readout)
 	input [15:0]	       cache_misses,
@@ -241,7 +242,9 @@ module dataController (
 	//                [0] hw_turbo_en  (R/W)
 	//                [1] hw_turbo_ovr (R/W)
 	//                [2] hw_cache_en  (R/W) — enables BRAM cache
+	//                [3] hw_video_off (R/W) — drop video/audio SDRAM fetches
 	//                [8] cpu_turbo_active (RO)
+	//                [11] hw_video_off (RO mirror)
 	// $F8000C (RO): Git commit short hash — injected at synthesis time via GIT_HASH define
 	// $F80010 (RO): [15:0] cache_hits   (cleared by writing 0x55xx to this slot)
 	// $F80014 (RO): [15:0] cache_misses
@@ -257,9 +260,9 @@ module dataController (
 	wire [15:0] hwRegsDataOut =
 	    (hwRegIdx == 3'd0) ? 16'h4E4D :
 	    (hwRegIdx == 3'd1) ? 16'h0001 :
-	    // W: bit0=turbo_en bit1=turbo_ovr bit2=cache_en bit[5:4]=fillph_turbo (phase=4+val)
-	    // RO: bit8=turbo_active bit10=cache_en
-	    (hwRegIdx == 3'd2) ? { 5'd0, hw_cache_en, 1'b0, cpu_turbo_active, 2'b00, hw_fillph_turbo, 1'b0, hw_cache_en, hw_turbo_ovr, hw_turbo_en } :
+	    // W: bit0=turbo_en bit1=turbo_ovr bit2=cache_en bit3=video_off bit[5:4]=fillph
+	    // RO: bit8=turbo_active bit10=cache_en bit11=video_off
+	    (hwRegIdx == 3'd2) ? { 4'd0, hw_video_off, hw_cache_en, 1'b0, cpu_turbo_active, 2'b00, hw_fillph_turbo, 1'b0, hw_cache_en, hw_turbo_ovr, hw_turbo_en } :
 	    (hwRegIdx == 3'd3) ? `GIT_HASH :
 	    (hwRegIdx == 3'd4) ? cache_hits   :
 	    (hwRegIdx == 3'd5) ? cache_misses :
@@ -273,7 +276,7 @@ module dataController (
 	wire [15:0] ice_peek_sel =
 	    (ice_peek_idx == 3'd0) ? 16'h4E4D :
 	    (ice_peek_idx == 3'd1) ? 16'h0001 :
-	    (ice_peek_idx == 3'd2) ? { 5'd0, hw_cache_en, 1'b0, cpu_turbo_active, 2'b00, hw_fillph_turbo, 1'b0, hw_cache_en, hw_turbo_ovr, hw_turbo_en } :
+	    (ice_peek_idx == 3'd2) ? { 4'd0, hw_video_off, hw_cache_en, 1'b0, cpu_turbo_active, 2'b00, hw_fillph_turbo, 1'b0, hw_cache_en, hw_turbo_ovr, hw_turbo_en } :
 	    (ice_peek_idx == 3'd3) ? `GIT_HASH :
 	    (ice_peek_idx == 3'd4) ? cache_hits   :
 	    (ice_peek_idx == 3'd5) ? cache_misses :
@@ -294,11 +297,13 @@ module dataController (
 			hw_turbo_en     <= 1'b0;
 			hw_turbo_ovr    <= 1'b0;
 			hw_cache_en     <= 1'b0;
+			hw_video_off    <= 1'b0;
 			hw_fillph_turbo <= 2'b11; // default: fill at phase 7 (turbo)
 		end else if (ice_poke_valid && (ice_poke_idx == 3'd2) && (ice_poke_data[15:8] == 8'h55)) begin
 			hw_turbo_en     <= ice_poke_data[0];
 			hw_turbo_ovr    <= ice_poke_data[1];
 			hw_cache_en     <= ice_poke_data[2];
+			hw_video_off    <= ice_poke_data[3];
 			hw_fillph_turbo <= ice_poke_data[5:4];
 		end else if (clk8_en_p) begin
 			if (selectHardwareRegs && !_cpuAS && !_cpuRW && (hwRegIdx == 3'd2) && (cpuDataIn[15:8] == 8'h55)) begin
@@ -306,8 +311,9 @@ module dataController (
 					hw_turbo_en     <= cpuDataIn[0];
 					hw_turbo_ovr    <= cpuDataIn[1];
 					hw_cache_en     <= cpuDataIn[2];
+					hw_video_off    <= cpuDataIn[3];
 					hw_fillph_turbo <= cpuDataIn[5:4];
-				end
+			end
 			end
 		end
 	end
