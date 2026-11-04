@@ -781,6 +781,10 @@ Mechanism (stock mode, single shared phase-2 SDRAM fetch):
    was (the pre-hang window here only shows the handler tail).
 
 ### OPTION A: BOARD RESULT (2026-11-03 evening) — CPU SIDE FIXED, VIDEO BROKEN
+⚠️ SUPERSEDED IN PART: the "CPU SIDE FIXED" claim only held in stock
+cache-OFF boot. The cache-ON freeze is ALIVE (re-confirmed 2026-11-03
+23:35 UTC, see "CORRECTION: the 'no freeze' claim was wrong for
+cache-ON" below this section).
 - **Built + flashed (commits 9e4e250, 37317a0).** Board: booted fully to
   desktop (NO hang; CPU/cache side works). But the DISPLAY IS SCRAMBLED:
   full-screen ~50/50 black/white horizontal-tear noise (captured:
@@ -901,6 +905,56 @@ Mechanism (stock mode, single shared phase-2 SDRAM fetch):
   commits 37317a0/9e4e250. Do NOT poke the cache on until the video
   path is fixed (old freeze behavior may still be present underneath
   - unknown, the scramble masks it).
+
+### CORRECTION (2026-11-03 ~23:45 UTC): the "no freeze / CPU fixed" claim was
+WRONG for cache-ON. Board re-triage (ICE port /dev/cu.usbserial-20230306211)
+reproduced the ORIGINAL hang signature with cache ON.
+- **Video theft CONFIRMED (triage A/B):** `poke 8` (hw_video_off=1) -> screen
+  SOLID BLACK (user-confirmed), CPU still active (state: AS:0 RM:1, addr
+  walking). `poke 0` -> 50/50 noise returns (user-confirmed). => scramble is
+  the cpu_mem_acc drop + advancing-combinational-videoAddr diagnosis, proven
+  on the board.
+- **Cache-ON FREEZE IS BACK:** `poke 4` (cache on, video on) at 23:34:51 UTC.
+  User observed the display go CLEAN (unscrambled) the moment the cache
+  invalidate sweep started -> that is a FROZEN FRAME, not a working desktop.
+  ILA state from 23:37:03 through 23:45+ (6+ reads over 4+ min):
+  `A:00003E Q:20 RW:R AS:1 RM:0 RO:0 TR:0`, SA (SADR) walking (video refresh
+  alive) on every read. Park at $00003E (A is the full 24-bit byte address;
+  this is the same address as access 5 in hang.vcd, the vector-15 lo-byte
+  read $00003C-3F). Same park address, same AS=1, same "SADR walks, CPU
+  silent" = the original hang.vcd signature, exactly.
+  Peek at freeze: F80008:0404 (cache=1 video_on), F80010/14/18 (hits/misses/
+  fills) = FFFF (saturated), F8001C last_fill=003E. Dump:
+  /tmp/hang2_optiona_cacheon.vcd (trigger armed, pos=0, 256 samples).
+- **What it means:** the evening session's "no freeze at startup" was only
+  ever observed in STOCK (cache OFF) mode. The freeze re-appears within
+  ~1-2 min of cache enable, identical signature to the pre-Option-A hang.
+  Two hypotheses remain open (undiscriminated):
+    (a) Option A does NOT actually close the collision path on the board
+        (e.g. the sim tb_ramwin divergence is real, not a sim gap) —
+        Option A is buggy on the board;
+    (b) the freeze is the Q1 FIRST-EXCEPTION: a different bug fires an
+        exception ~1 min after cache enable; the handler then does the
+        $000004/$000006/$00000C/$00000E/$00003E vector-table walk and the
+        LAST vector read ($00003E) is dropped by the video/CPU slot
+        collision -> hard park. (i.e. Option A works for the collision,
+        but the collision is only the KILL SHOT, and a separate trigger
+        bug survives.)
+  Discriminator: capture the FIRST vector write — `trigset 3 0x000004
+  0xFFFFFF`, arm, poke 4, dump. If the trace shows a normal instruction
+  stream before the first $000004 write, and the read at $00003E that
+  parks IS serviced (SADR reaches 00001F in the pre-hang window), it is (b)
+  with a separate trigger; if the $00003E read is again never serviced
+  (SADR walks video RAM), it is (a).
+- **Board state at correction:** FROZEN (cache on, video on, scrambled-then-
+  frozen frame). Recovery: `poke 0` does NOT clear the frozen CPU; the
+  machine needs a power cycle or ICE reset ('R' clears hw regs only).
+- **Todo-list / next-step delta:** the handoff's NEXT item 1 (board triage)
+  is now COMPLETE with this result: video theft confirmed, cache-on freeze
+  REPRODUCED (not confirmed-good). NEXT item 2 (sim pixel-stream oracle)
+  and item 3 (lossless video fix) are still needed but are NOT sufficient
+  to restore cache use: the freeze must be root-caused first, or the cache
+  can never be left on for the Speedometer benchmark.
 
 ### OPTION A IMPLEMENTED + SIM-VALIDATED (2026-11-03 session)
 - **Deterministic collision TB (sim/tb_ramwin.sv)**: real clocks +
@@ -1124,17 +1178,35 @@ ILA: clk_pixel, 256x64 trace, probe map v2 (see "Probe map v2" above;
 - context limit 262k; this handoff doc is the recovery point.
 
 ## FRESH-SESSION PROMPT (paste as first message 2026-11-04+)
-Read HANDOFF.md: (1) "OPTION A: BOARD RESULT (2026-11-03 evening) -
-CPU SIDE FIXED, VIDEO BROKEN" first, (2) then "OPTION A IMPLEMENTED +
-SIM-VALIDATED", (3) then the hang.vcd decode section above it.
+Read HANDOFF.md: (1) "CORRECTION (2026-11-03 ~23:45 UTC): the 'no
+freeze / CPU fixed' claim was WRONG for cache-ON" first, (2) then
+"OPTION A IMPLEMENTED + SIM-VALIDATED", (3) then the hang.vcd decode
+section above it.
 
 STATE: Option A (CPU wins the phase-2 SDRAM fetch slot) is built +
-flashed (commits 9e4e250, 37317a0, docs 0638d13). The CPU/hang side is
-FIXED on the board: full boot to desktop, no freeze at startup. But
-the DISPLAY IS SCRAMBLED (full-screen 50/50 black/white horizontal
-tear noise; screenshot images/frame_optiona_scramble.png) even in
-stock Turbo=OFF Cache=OFF with no pokes. Boot itself (text/RAM test)
-was fine - the corruption is in the video pixel pipeline.
+flashed (commits 9e4e250, 37317a0, docs 0638d13). TWO independent
+bugs are live on the board, both confirmed by board triage 2026-11-03
+evening (ICE port /dev/cu.usbserial-20230306211):
+(1) VIDEO SCRAMBLE (stock, cache OFF, no pokes): full-screen 50/50
+    black/white horizontal-tear noise (images/frame_optiona_scramble.png).
+    CONFIRMED via A/B: poke 8 (hw_video_off) -> solid black, poke 0 ->
+    noise returns. Diagnosis: cpu_mem_acc (addrController.v:125) is
+    high whenever the 68k is in an in-flight RAM access; at the desktop
+    that's ~50% of video fetch ticks -> the video word is DROPPED while
+    the combinational videoAddr (videoTimer.v:62) advances anyway ->
+    shifter desync per dropped word. Fix = lossless video (A2 registered
+    fetch counter), after a sim pixel-stream oracle.
+(2) CACHE-ON HARD FREEZE (the ORIGINAL hang, NOT fixed by Option A):
+    poke 4 (cache on, video on) -> within ~1-2 min the CPU parks at
+    $00003E, AS=1, RW:R, RM:0, SADR walking (video alive) - the exact
+    hang.vcd signature. The "clean desktop" seen at freeze is a FROZEN
+    FRAME (CPU dead -> no slot theft -> video redraws the last frame).
+    "No freeze" was only ever observed in cache-OFF boot. Open
+    hypotheses: (a) Option A's collision path is not actually closed on
+    the board, or (b) the freeze is the Q1 first-exception (a separate
+    bug) whose handler's final vector read is the kill shot.
+    Discriminator = capture the first vector write: trigset 3 0x000004
+    0xFFFFFF. Board is FROZEN as of session end; recovery = power cycle.
 
 DIAGNOSIS (high confidence, NOT yet proven in sim): /AS is
 ACTIVE-LOW, so the Option-A gate `cpu_mem_acc = selectRAM && !_cpuAS`
@@ -1157,15 +1229,22 @@ AS-low (all ticks CPU-expected; lost video words uncounted) or 100%
 AS-high (no collisions) - it never models the ~50%-duty desktop
 pattern - and nanomac_tb has NO pixel-stream oracle at all.
 
-NEXT (in order):
-1. Board triage first (board is up, scrambled, stock, cache off, NO
-   pokes): `python3 scripts/nanomac_ice.py poke 8` (hw_video_off=1)
-   -> screen should go solid/blank (no noise) = corruption is in the
-   video fetch path (expected). `poke 0` -> noise returns. Then
-   `poke 4` (cache on, video ON): if it STILL does not freeze after
-   minutes, the CPU-side half of Option A is confirmed good even
-   with broken video (poison path closed); record + peek.
-2. SIM FIRST - a pixel-stream oracle is mandatory before any video
+NEXT (in order; updated 2026-11-03 evening after re-triage):
+1. BOARD TRIAGE - DONE (2026-11-03 evening, see CORRECTION section):
+   video theft confirmed (poke 8 -> solid black, poke 0 -> noise back);
+   cache-on freeze REPRODUCED (poke 4 -> park at $00003E, AS=1, SADR
+   walking; hit/miss/fill counters FFFF; /tmp/hang2_optiona_cacheon.vcd).
+   Board left FROZEN -> needs POWER CYCLE before any further work.
+2. FREEZE FIRST (blocks all cache use; must precede the benchmark):
+   power cycle, settle to stock desktop (scrambled, CPU alive), canary
+   (trigset 4 + arm + 30s + dump -> pos=0), then `trigset 3 0x000004
+   0xFFFFFF` (first vector-table write) + arm + `poke 4` + wait ~2 min
+   + dump. Decode: (a) $00003E read serviced in pre-hang window (SADR
+   reaches 00001F) => freeze is Q1 separate-exception trigger; (b)
+   $00003E read never serviced again => Option A's collision path is
+   NOT closed on the board (sim/tb_ramwin says PASS but board says
+   FAIL -> find the divergence). Decide direction from that evidence.
+3. SIM FIRST - a pixel-stream oracle is mandatory before any video
    RTL change:
    (a) tb_ramwin.sv: add a third phase where the fake 68k does
        50%-duty RAM reads (AS low ~400 ticks / high ~400 ticks,
@@ -1176,19 +1255,19 @@ NEXT (in order):
        video SDRAM fetches (or compare loaded words against a known
        framebuffer pattern) - this single check would have caught
        the scramble.
-3. FIX (only after the sim reproduces the scramble): keep CPU-wins
-   arbitration, make video LOSSLESS - preferred Option A2: the
-   video fetch address becomes a REGISTERED counter that advances
+4. FIX video (only after the sim reproduces the scramble): keep
+   CPU-wins arbitration, make video LOSSLESS - preferred Option A2:
+   the video fetch address becomes a REGISTERED counter that advances
    only when the SDRAM slot is actually won by video (a collision
    delays, never drops, the word; verify in sim that the shifter
    tolerates the resulting 1-E-cycle word gap as one black pixel-
    pair, not a line tear). Alternative A1: pending-flag + latched
    videoAddr retry. Option B: 2-deep request queue in sdram.v FSM.
-   Do NOT ship any video change without (2) green.
-4. Only when stock video is clean again: redo the original board
-   sequence (settled canary, poke 4 cache-on -> no freeze, poke 12
-   display-off confirmation 5+ min, optional Q1 trigset 3 0x000004
-   0xFFFFFF first-vector-write), then Speedometer 3-iter sieve vs
+   Do NOT ship any video change without (3) green.
+5. Only when stock video is clean AND the freeze root cause is
+   resolved (step 2): full board validation (settled canary, poke 4
+   cache-on -> no freeze for 5+ min, poke 12 display-off
+   confirmation 5+ min), then Speedometer 3-iter sieve vs
    14.0M cycles/iter baseline + clear/peek counter window.
 
 RULES (unchanged): validate-in-sim-first before building/flashing;
