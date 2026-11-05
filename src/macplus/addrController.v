@@ -43,6 +43,7 @@ module addrController (
 	output	      vsync,
 	output	      _hblank,
 	output	      _vblank,
+	input	      videoHalt, // Option B: videoFifo back-pressure (freeze raster)
 	output	      loadPixels,
 	input	      vid_alt,
 		
@@ -184,14 +185,15 @@ module addrController (
 		.clk(clk),
 		.clk8_en_p(clk8_en_p),
 		.clk8_en_n(clk8_en_n),
-		.videoCycle(videoBusControl), 
+		.videoCycle(videoBusControl),
 		.vid_alt(vid_alt),
-		.videoAddr(videoAddr), 
-		.hsync(hsync), 
-		.vsync(vsync), 
+		.halt(videoHalt),
+		.videoAddr(videoAddr),
+		.hsync(hsync),
+		.vsync(vsync),
 		._hblank(_hblank),
-		._vblank(_vblank), 
-		.refresh(refresh), 
+		._vblank(_vblank),
+		.refresh(refresh),
 		.loadPixels(loadPixels));
 		
 endmodule

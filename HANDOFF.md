@@ -1486,6 +1486,57 @@ NEXT (in order; updated 2026-11-04 after root-cause session):
      the SDRAM allows, keeping the FIFO >= target depth; the shifter
      drains the FIFO at the display cadence (phase 7). CPU collisions
      only dip the fill rate; the FIFO headroom absorbs them -> lossless.
+   - OPTION B IMPLEMENTATION WIP (2026-11-05, committed):
+     * src/macplus/videoFifo.sv (NEW): 128-word (2Kbit) elastic FIFO +
+       run-ahead prefetch pointer (pf_idx, runs ahead of the display up
+       to TARGET=64 words; issues a read when depth<TARGET && ahead<=
+       RUNAHEAD). Push on rd_done (video word), pop on the shifter load
+       edge. `halt` OUTPUT = (depth<=2) freezes the display (the lossless
+       guarantee: a low FIFO costs a frozen line, never a tear). `depth`
+       output for ILA/debug. KEY: prefetch must NOT be gated on
+       videoBusControl - it may use ANY free phase-2 slot (video OR CPU
+       half; the SDRAM is a shared bus) - that is what creates the
+       run-ahead headroom. Prefetch must CONTINUE while halt.
+     * src/macplus/videoTimer.v: `halt` input - holds xpos/ypos (freezes
+       the raster; hsync/vsync/blanks hold their values) and gates
+       loadPixels so the shifter does not pop while frozen.
+     * src/macplus/addrController.v: `videoHalt` input port -> the
+       videoTimer instance .halt.
+     * sim/tb_videofifo.sv (NEW): focused lossless TB (videoTimer +
+       videoFifo + real SDRAM FSM + real videoShifter + 50%-duty fake
+       68k + arbiter: CPU wins its slot per Option A; video prefetch
+       may use any free phase-2 slot). Oracles: PIXEL (shifter word ==
+       framebuffer pattern 16'(wordaddr) at the display position), CPU
+       (rd_addr == issued word), FIFO invariants (no over/underflow).
+       Build: verilator -j 4 --timing --binary -Wno-lint -Wno-fatal
+       -top-module tb_videofifo ../src/macplus/{clocks,videoTimer,
+       videoFifo,videoShifter}.v ../src/tang/nano20k/sdram.v
+       tb_videofifo.sv -Mdir obj_vfifo
+     * VALIDATED (tb_videofifo, 2026-11-05): CPU oracle 100% (8734/8734,
+       Option A preserved); FIFO no overflow/underflow, depth stable
+       ~56, and a direct head/disp_idx dump proves the FIFO head is
+       ALWAYS the correct next display word (in-order, no dupes/drops).
+       SDRAM issue must be at phase 2 with a 1-tick-delayed pf_want
+       (pref_oe_r) and a HELD address (hold_addr) for the whole read -
+       the real 68k/video hardware holds the address.
+     * OPEN BUG (the last thing before green): the shifter head drifts
+       ~2x the display position (loaded=938a while display at 9383),
+       i.e. the prefetch leads the display by the whole depth (~56) but
+       the shifter consumes words faster than the display advances ->
+       in the FOCUSED TB the `pop` cadence (loadPixels&cycleReady,
+       once/16t) does not exactly match the 1-word-per-display-word
+       lockstep the real board maintains. FIX DIRECTION: anchor the
+       drain to the DISPLAY index - pop the FIFO head only when the
+       display index advances to the head's index (head is the word for
+       the CURRENT position; consume exactly as the display advances),
+       and clamp the prefetch target so the head leads the display by
+       no more than the pipeline (~4 words), not the full 64. Once the
+       focused TB is green (pixel oracle 100%), integrate in macplus.sv
+       (instantiate videoFifo, feed the videoShifter dataIn from the
+       FIFO, route the video SDRAM fetch through it, wire videoHalt),
+       then re-run tb_ramwin (the scramble must turn GREEN: every
+       requested video word fetched exactly once) + tb_mirror + full
+       machine regression (cache on/off).
    - Acceptance (tb_ramwin, unchanged oracle): video-requests ==
      fetched exactly once each (fifo-depth-at-end=0, 0 mismatches),
      CPU fetches still all-ok (Option A preserved), full-machine
