@@ -1070,9 +1070,73 @@ built/flashed).
      $8FF000+ is now readable via peek/SADR).
   4. Video-lossless (A2) work per NEXT step 4 is UNCHANGED and
      independent.
-- **Board state at this note:** board last seen FRESH (re-flashed
-  2026-11-04 ~01:51 UTC, stock, scrambled video, CPU alive);
-  simulator carries the mirror fix, board does NOT yet.
+- **⚠️ BOARD RESULT (2026-11-04 evening, after build + flash -f):**
+  1. Re-flash reset the board (FPGA re-init). Booted to Finder
+     (scrambled video, as expected — mirror fix does not touch
+     video). Canary (mode 4, 30s): pos=0, clean.
+  2. Mode-4 armed + poke 4 (cache on) at 01:02 UTC. **Still froze**
+     (within the 5-min window; old build froze ~2.5 min).
+  3. Mode-4 dump: /tmp/hang4_mirfix.vcd, decode
+     /tmp/hang4_decode.txt. THE KILL SHOT:
+     - NEW vs the old freeze: **no vector-loop soup, no repeats.**
+       The handler's vector installs now GO THROUGH. Pre-hang:
+       RMW at $F03FC8/$F03FCA (A23-mirror scratch — serviced),
+       code fetches from $F041D2 (ROM region, executing), then
+       a WRITE at $F0951A (idx 251) -> park.
+     - Park = A=F0951A (unmapped "test software" space), AS=1,
+       no fetch (RM=RO=0, RQ=0), video SADR walking (video alive).
+     - Mode-3 re-arm on the park address fired at pos=0 within
+       15s => NOT a silent park: the CPU is in a TIGHT RETRY LOOP
+       on $F0951A (fetch there -> fault -> re-exception -> same
+       vector -> $F0951A). The handler installed a vector pointing
+       at the garbage crash-derived value $F0951A, which decodes
+       to nothing -> permanent exception loop.
+     - $F0951A is NOT a ROM/decode address: it came from the crash
+       data (corrupted computed jump in the handler, mirroring the
+       board symptom class — see the scramble: video words alias
+       RAM reads when a DMA wins, so any crash data read through
+       a collided fetch is garbage; the handler trusts it).
+  4. IMPLICATIONS:
+     - The mirror fix WORKED (handler now functional; freeze moved
+       from the deaf/blind vector loop to a later, data-derived
+       target). But it was NOT SUFFICIENT for cache-on stability:
+       the handler's crash-record reads (incl. the $8FF000 log)
+       still see poisoned data when a video/audio DMA wins the
+       SDRAM slot for a CPU word -> the handler then installs
+       corrupted vectors.
+     - This reframes Q1: the FIRST exception may be genuine (or
+       video-poisoned) and the handler faithfully logs the poison;
+       the FATAL event is the handler acting on poisoned crash
+       data. Both share one root: CPU RAM words are still
+       droppable/stale-able when the video wins the phase-2 slot
+       (Option A closes the FETCH slot but NOT the READ-DATA path
+       for the stale-bus fall-through in dataController.sv:322,
+       and does not make the video side lossless).
+  5. NEXT (Q1 + Q2, in order):
+     a. Re-flash (reset) -> settle -> stock desktop.
+     b. Capture the CRASH LOG: trigset 3 0x8FF000 0xFFFFFF
+        (fires on the handler's FIRST crash-log access — any
+        read/write), arm, poke 4, wait ~2 min (freeze window).
+        The first ~32 words after the trigger = the crash record:
+        PC, A-registers, exception type (the 68k pushes the
+        exception frame, the handler logs it). That gives Q1 =
+        the true first-exception ID (0x1E = supervisor illegal
+        instr was seen last session; re-verify).
+     c. If Q1 shows a benign vector (e.g. 0x1E), the chain is
+        poison-induced: the handler's crash-data reads must be
+        made collision-immune. Options: (1) extend Option A so a
+        CPU access that LOSES the video slot gets a guaranteed
+        RETRY fetch (pending flag + latched addr) before DTACK —
+        i.e. lossless CPU (mirror of the A2 video-lossless work);
+        (2) or make dataController.sv:322 never fall through to
+        stale ramDataIn (hold last valid / insert wait states)
+        when selectRAM but the fetch was stolen.
+     d. THEN the A2 video-lossless + pixel-oracle work (NEXT #4)
+        — both sides of the coin must be lossless for desktop
+        stability.
+- **Board state at this note:** FROZEN in the $F0951A retry loop
+  (cache-on, mirrored build c517ef3+6cf8a38+build, scrambled
+  video). Re-flash to reset. ILA armed mode-3 @0xF0951A.
 
 ### OPTION A IMPLEMENTED + SIM-VALIDATED (2026-11-03 session)
 - **Deterministic collision TB (sim/tb_ramwin.sv)**: real clocks +
@@ -1353,14 +1417,20 @@ NEXT (in order; updated 2026-11-04 after root-cause session):
    power-cycle substitute) and freeze root cause (see ROOT CAUSE
    section): Option A refuted as the cause; missing A18/vector mirror is
    the cause; Q1 = first-exception origin still open.
-2. MIRROR FIX - DONE in sim (2026-11-04/05; see ROOT CAUSE section):
-   tb_mirror 23/23 PASS, full regression green (cache on/off),
-   tb_ramwin re-pass. Working tree: addrDecoder.v + addrController.v
-   + macplus.sv + sim/tb_mirror.sv. Board does NOT have the fix yet.
-   NEXT: build (cd src && bash build.sh) -> flash -f -> board
-   confirm: settle, canary, poke 4, 5+ min NO freeze; re-arm mode 4
-   to capture any surviving hang (Q1: the handler can now LOG the
-   real first-exception crash log at $8FF000+).
+2. MIRROR FIX - DONE (commit 6cf8a38; sim green + BUILT + FLASHED
+   2026-11-04 evening). Board result: handler now FUNCTIONAL
+   (vector installs go through; no more vector-loop soup), but
+   cache-on STILL freezes ~2 min: handler follows garbage
+   crash-derived jump to unmapped $F0951A -> tight retry loop.
+   Root: crash-data reads still poisoned when a video/audio DMA
+   wins the SDRAM slot (Option A closes the fetch slot, not the
+   stale-bus read-data path). See "BOARD RESULT" in ROOT CAUSE.
+   NEXT (Q1/Q2): re-flash reset -> stock desktop -> trigset 3
+   0x8FF000 0xFFFFFF + arm + poke 4 -> ~2 min -> dump: first words
+   after trigger = the crash log (Q1: the real first-exception
+   type). Then make CPU read-data collision-immune (retry-fetch or
+   no stale fall-through at dataController.sv:322), THEN A2
+   video-lossless + pixel oracle.
 3. SIM FIRST - a pixel-stream oracle is mandatory before any video
    RTL change:
    (a) tb_ramwin.sv: add a third phase where the fake 68k does
