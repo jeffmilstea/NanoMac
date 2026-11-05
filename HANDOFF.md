@@ -1359,36 +1359,62 @@ ILA: clk_pixel, 256x64 trace, probe map v2 (see "Probe map v2" above;
 - Timing report violations are a red herring (SDC only constrains clk_osc).
 - context limit 262k; this handoff doc is the recovery point.
 
-## FRESH-SESSION PROMPT (paste as first message 2026-11-05+)
-Read HANDOFF.md: (1) "ROOT CAUSE of the cache-on freeze (2026-11-04
-session): the ROM crash handler runs against a MISSING A18-RAM mirror
-+ vector-table mirror" first, (2) then "CORRECTION (2026-11-03
-~23:45 UTC): the 'no freeze / CPU fixed' claim was WRONG for
-cache-ON", (3) then "OPTION A IMPLEMENTED + SIM-VALIDATED".
+## FRESH-SESSION PROMPT (paste as first message 2026-11-05 evening+)
+Read HANDOFF.md in this order: (1) "BOARD RESULT" inside "ROOT CAUSE of
+the cache-on freeze" (handler now functional; freeze MOVED to a tight
+loop at unmapped $F0951A on poisoned crash data), (2) "SIM FIRST"/
+"VIDEO-LOSSLESS FIX - design settled" + "OPTION B IMPLEMENTATION WIP"
+in the NEXT section, (3) the Rules at the bottom.
 
-STATE (2026-11-04): Option A (CPU wins the phase-2 SDRAM fetch slot) is
-built + flashed (commits 9e4e250, 37317a0, docs 0638d13). TWO live
-bugs, plus the freeze root cause now identified:
-(1) VIDEO SCRAMBLE (stock, cache OFF, no pokes): full-screen 50/50
-    black/white noise (images/frame_optiona_scramble.png). CONFIRMED via
-    A/B (poke 8 -> solid black, poke 0 -> noise). Diagnosis: cpu_mem_acc
-    (addrController.v:125) high during in-flight 68k RAM accesses -> ~50%
-    of video fetch ticks drop the word while combinational videoAddr
-    (videoTimer.v:62) advances anyway -> shifter desync per drop.
-    Fix = lossless video (A2 registered fetch counter), after a sim
-    pixel-stream oracle.
-(2) CACHE-ON HARD FREEZE — ROOT CAUSE FOUND (see "ROOT CAUSE of the
-    cache-on freeze" section): Option A works on the board (every
-    active CPU RAM access owns its fetch — hypothesis (a) REFUTED by
-    /tmp/hang3_freeze_trig.vcd). The freeze = a first exception (Q1,
-    origin still unknown) ~1 min after cache enable; the genuine ROM
-    crash handler then runs against the MISSING A18-RAM mirror
-    ($800000-$BFFFFF) and vector-table mirror ($FFFFF0-$FFFFFF) in
-    addrDecoder.v (select nothing -> stale data reads, vanishing
-    vector installs) -> handler runs blind -> corrupted jump -> park
-    (AS=1, SADR walking; "clean desktop" at freeze = frozen frame).
-    Q1 (first-exception origin) is now the OPEN item; the mirror fix
-    must be sim-validated first.
+STATE (2026-11-05): Option A + MIRROR FIX (A23 RAM mirror + $FFFFE0-
+$FFFFFF interrupt-vector mirror + cache alias exclusion) are SHIPPED
+(commits 6cf8a38 fix, 7564dad board result; built + flashed 2026-11-04
+evening). Board: canary clean; cache-on STILL freezes ~2 min, now in a
+tight retry loop at $F0951A (handler installed a garbage crash-derived
+vector; the handler's crash-data reads get poisoned when a video/audio
+DMA wins the shared SDRAM slot). VIDEO SCRAMBLE (stock, 50/50 tear) is
+REPRODUCED IN SIM: tb_ramwin 50%-duty desktop phase + video-lossless
+FIFO oracle (commit 7146a4b) = 101/102 video words dropped on current
+RTL. KEY FACTS (measured): shifter is LOCKSTEP with no word memory
+(load @ phase 7, data valid phase 6, fetch issued phase 2, same slot);
+SDRAM FSM idle at EVERY phase-2 slot (free=969/969) -> headroom exists.
+A2/A1 (address-hold/re-issue-next-slot) are NOT viable (word would land
+in the next pixel's slot). User approved Option B = run-ahead elastic
+video prefetch FIFO.
+
+NEXT (the single remaining sim task before any build/flash):
+1. Finish sim/tb_videofifo.sv (Option B WIP, commit 34467ae):
+   src/macplus/videoFifo.sv (128-word FIFO + run-ahead prefetch ptr +
+   halt back-pressure), videoTimer.v (halt input), addrController.v
+   (videoHalt port) are DONE. Validated: CPU oracle 100%, FIFO
+   invariants clean, head word always correct next display word.
+   OPEN BUG: shifter head drifts ~2x the display (loaded=938a vs
+   display 9383) — the prefetch leads the display by the whole depth
+   and the TB's pop cadence doesn't track the display index. FIX:
+   anchor the drain to the display index (pop exactly when the display
+   advances to the head's index) and clamp the prefetch so the head
+   leads the display by only ~pipeline words (~4), not 64. Get the
+   PIXEL oracle to 100%.
+2. Then integrate in macplus.sv: instantiate videoFifo, feed the
+   videoShifter dataIn from the FIFO (replacing ramDataIn on video
+   pops), route video SDRAM fetches through the FIFO arbiter (CPU wins
+   per Option A; prefetch may use ANY free phase-2 slot — NOT gated on
+   videoBusControl; issue at phase 2 with 1-tick-delayed pf_want and a
+   HELD address for the whole read), wire videoHalt.
+3. Acceptance, all green: tb_videofifo pixel oracle 100%; tb_ramwin
+   video-lossless (fifo-depth-at-end=0, 0 mismatches, CPU 425/425);
+   tb_mirror PASS; full machine cache on/off regression (hits ~9.7M/10s,
+   bad=0).
+4. THEN build (src/build.sh) + flash -f + board: stock video should be
+   CLEAN (scramble gone); Q1 crash-log capture (re-flash, trigset 3
+   0x8FF000 0xFFFFFF + arm + poke 4, dump after ~2 min = the crash
+   record at the first-exception type); then freeze follow-up
+   (poisoned crash-data path) + Speedometer 3-iter sieve vs 14.0M
+   cycles/iter baseline.
+
+Board state: FROZEN in the $F0951A retry loop (cache-on, mirrored
+build, scrambled video). Re-flash = reset. ILA currently armed mode-3
+@0xF0951A.
 
 DIAGNOSIS (high confidence, NOT yet proven in sim): /AS is
 ACTIVE-LOW, so the Option-A gate `cpu_mem_acc = selectRAM && !_cpuAS`
