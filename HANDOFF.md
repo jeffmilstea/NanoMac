@@ -1431,31 +1431,69 @@ NEXT (in order; updated 2026-11-04 after root-cause session):
    type). Then make CPU read-data collision-immune (retry-fetch or
    no stale fall-through at dataController.sv:322), THEN A2
    video-lossless + pixel oracle.
-3. SIM FIRST - a pixel-stream oracle is mandatory before any video
-   RTL change:
-   (a) tb_ramwin.sv: add a third phase where the fake 68k does
-       50%-duty RAM reads (AS low ~400 ticks / high ~400 ticks,
-       address cycling through RAM words) = the desktop pattern, and
-       assert EVERY video word is eventually fetched exactly once
-       (none missing, none duplicated), even if some arrive late.
-   (b) nanomac_tb.cpp/.v: assert 1:1 between loadPixels ticks and
-       video SDRAM fetches (or compare loaded words against a known
-       framebuffer pattern) - this single check would have caught
-       the scramble.
-4. FIX video (only after the sim reproduces the scramble): keep
-   CPU-wins arbitration, make video LOSSLESS - preferred Option A2:
-   the video fetch address becomes a REGISTERED counter that advances
-   only when the SDRAM slot is actually won by video (a collision
-   delays, never drops, the word; verify in sim that the shifter
-   tolerates the resulting 1-E-cycle word gap as one black pixel-
-   pair, not a line tear). Alternative A1: pending-flag + latched
-   videoAddr retry. Option B: 2-deep request queue in sdram.v FSM.
-   Do NOT ship any video change without (3) green.
-5. Only when stock video is clean AND the freeze root cause is
-   resolved (step 2): full board validation (settled canary, poke 4
-   cache-on -> no freeze for 5+ min, poke 12 display-off
-   confirmation 5+ min), then Speedometer 3-iter sieve vs
-   14.0M cycles/iter baseline + clear/peek counter window.
+3. PIXEL ORACLE - DONE (commit 7146a4b): tb_ramwin gained the 50%-duty
+   desktop phase (AS low ~400 / high ~400, address cycling) + a
+   video-lossless FIFO (every requested video word must be fetched
+   EXACTLY ONCE, in order). RED on current RTL: 102 requested, 101
+   dropped, 74 FIFO mismatches -> the scramble reproduced in sim.
+   (a) is done; (b) full-machine nanomac_tb pixel check still open
+   (nice-to-have; tb_ramwin is the primary gate).
+4. VIDEO-LOSSLESS FIX - design settled 2026-11-05 (user picked
+   Option B):
+   - KEY FINDINGS:
+     * The video shifter (videoShifter.v) is LOCKSTEP: it loads dataIn
+       on every clock edge while loadPixels is high, shifts in BLACK
+       otherwise, and has NO word memory. A collision does not just
+       "delay the word": the shifter loads the (absent/foreign) data
+       for the current pixel and the stream desyncs for the rest of
+       the line = the observed 50/50 tear.
+     * SDRAM read path is a FIXED ~5-tick pipeline (accept@phase-2 ->
+       ACTIVE/CAS/NOPs -> rd_done@STATE_READ, sdram.v:153-192) and one
+       word in flight at a time. Measured in tb_ramwin: the SDRAM FSM
+       is IDLE at every phase-2 slot (busy=0, free=969/969) - a
+       fetch takes ~5 of the 16 ticks of a video slot, so there is
+       PLENTY of bandwidth headroom. The bottleneck is the shifter
+       lockstep, not the SDRAM.
+     * Option A2 (registered fetch counter / address-hold) is NOT
+       viable alone: holding the address delays the word by a full
+       16-tick period, which lands it in the NEXT pixel's load
+       window -> whole-line desync. It cannot re-inject a word into
+       the shifter's fixed load edge.
+   - CHOSEN: Option B = make the video path ELASTIC:
+     (1) request side: a small FIFO of pending video words in
+         macplus/addrController (raw lpx tick pushes videoAddr; a
+         granted phase-2 slot pops it and issues the SDRAM fetch;
+         CPU wins an in-flight collision -> word stays in FIFO).
+     (2) data side: a 1-2 deep elastic word buffer (FIFO) between
+         the SDRAM dout and the videoShifter, so a late word still
+         reaches the shifter's load edge without shifting the line.
+         The shifter keeps its fixed load rhythm; words queue
+         elastically.
+   - PHASE ALIGNMENT (measured in tb_ramwin, 2026-11-05): for one
+     video cycle, loadPixels is high phases 1..7 of the video half
+     (vbm=1); the SDRAM fetch is ISSUED at phase 2; data returns
+     (rd_done) at phase 6; the shifter loads at phase 7
+     (loadPixels & cycleReady, cycleReady=phase==7). So the word for
+     pixel N is fetched AND loaded in the SAME cycle N - there is NO
+     slack: a word delayed by even one cycle lands after the shifter
+     has already passed pixel N. => a simple "re-issue next slot"
+     (A1/A2) CANNOT be lossless; the shifter must be decoupled from
+     the fetch by a run-ahead elastic prefetch FIFO (true Option B).
+   - Implementation shape (next): a small video word FIFO + a
+     run-ahead prefetch pointer that fetches upcoming videoAddr words
+     (linear within a line: videoAddr = base + {ypos,xpos[8:4]}, so
+     fetch-ahead = current +k, with a line-end wrap case) as fast as
+     the SDRAM allows, keeping the FIFO >= target depth; the shifter
+     drains the FIFO at the display cadence (phase 7). CPU collisions
+     only dip the fill rate; the FIFO headroom absorbs them -> lossless.
+   - Acceptance (tb_ramwin, unchanged oracle): video-requests ==
+     fetched exactly once each (fifo-depth-at-end=0, 0 mismatches),
+     CPU fetches still all-ok (Option A preserved), full-machine
+     regression green (cache on/off), tb_mirror green.
+5. THEN board: build -> flash -f -> stock video should be CLEAN
+   (scramble gone) even cache-on; then Q1 crash-log capture (trigset
+   3 0x8FF000) + the freeze follow-up (poisoned crash-data path),
+   then Speedometer 3-iter sieve vs 14.0M cycles/iter baseline.
 
 RULES (unchanged): validate-in-sim-first before building/flashing;
 hypothesize -> validate with evidence -> confirm with user before

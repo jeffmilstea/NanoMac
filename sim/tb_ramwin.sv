@@ -174,6 +174,9 @@ module tb_ramwin;
   integer ticks = 0;
   integer fails = 0, cpu_fetches = 0, cpu_ok = 0, vid_fetches = 0, vid_ok = 0,
           snd_fetches = 0, snd_ok = 0;
+  // SDRAM bandwidth measurement (phase-2 slot occupancy)
+  reg        fsm_busy = 0;              // 1 while a fetch is in flight
+  integer ph2_total = 0, ph2_issued = 0, ph2_busy = 0, ph2_free = 0;
 
   always @(posedge clk) begin
     if (!reset) begin
@@ -209,6 +212,10 @@ module tb_ramwin;
         chk_pending = 1'b0;
       end
 
+      // ---- SDRAM FSM in-flight tracking (bandwidth measurement) ----
+      // a fetch occupies the FSM from its phase-2 accept until rd_done
+      if (rd_done) fsm_busy = 1'b0;
+
       // ---- video-lossless: record every requested video word ----
       // Scoped to the desktop duty window (phase 3): a request is a
       // phase-2 tick with raw video DMA demand, and the word MUST be
@@ -232,7 +239,11 @@ module tb_ramwin;
 
       // ---- classify the phase-2 tick ending NOW (FSM decides here too) ----
       if (ready && (phase == 3'd2)) begin
+        ph2_total = ph2_total + 1;
+        if (fsm_busy) ph2_busy = ph2_busy + 1; else ph2_free = ph2_free + 1;
         if (_ramOE == 1'b0 || _ramWE == 1'b0) begin // a fetch is issued
+          fsm_busy = 1'b1;
+          ph2_issued = ph2_issued + 1;
           chk_pending = 1'b1;
           if (selectRAM && !_cpuAS) begin
             // CPU RAM access is address-valid: it must own the slot
@@ -260,6 +271,8 @@ module tb_ramwin;
                  ticks, cpu_fetches, cpu_ok, vid_fetches, vid_ok, snd_fetches, snd_ok);
         $display("video-requests(desktop)=%0d  fifo-depth-at-end=%0d (unfetched video words)",
                  vid_requests, req_depth);
+        $display("BW: phase2-slots=%0d  issued=%0d  free=%0d  busy=%0d  (video-collision-overrun risk if busy>>free)",
+                 ph2_total, ph2_issued, ph2_free, ph2_busy);
         $display("MISMATCHES: %0d", fails);
         if (fails == 0 && cpu_fetches > 0 && req_depth == 0)
           $display("RESULT: PASS - CPU wins every slot AND video is lossless (every requested word fetched exactly once)");
