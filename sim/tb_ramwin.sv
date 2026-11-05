@@ -38,8 +38,12 @@
 module tb_ramwin;
 
   localparam [20:0] CPU_WORD = 21'h00001F; // $00003E >> 1  (vector-15 area)
-  localparam RUN_TICKS  = 4000;             // 500 E-cycles ~= 1.4 video lines
-  localparam CPU_OFF    = 2000;             // /AS deasserts here (CPU idle)
+  localparam RUN_TICKS  = 8000;             // 3 phases x ~2000 ticks
+  localparam CPU_OFF    = 2000;             // phase 2: /AS deasserts (CPU idle)
+  localparam PHASE3_OFF = 4000;             // phase 3: 50%-duty desktop pattern
+  localparam DUTY_TICKS = 400;              // phase 3: /AS low/high ~400 ticks each
+  localparam DUTY_END   = 6400;             // phase 3 duty region ends here
+  localparam VID_FIFO   = 1024;             // video-lossless oracle FIFO depth
 
   reg clk = 0, reset = 1;
   always #5 clk = ~clk; // period 10ns; synchronous logic, period irrelevant
@@ -58,8 +62,9 @@ module tb_ramwin;
   );
 
   // addrController (contains addrDecoder + videoTimer)
-  wire [23:1] cpuAddr = CPU_WORD;  // fake 68k: continuous read of $00003E
-  reg _cpuAS = 0;                  // read active; toggled by the initial block
+  reg  [23:1] cpuAddr = CPU_WORD;  // fake 68k read address (cycled in phase 3)
+  reg  _cpuAS = 0;                 // read active; toggled by the initial block
+  integer  cpu_cycle = 0;          // phase 3: /AS low period counter
   wire _cpuRW  = 1;                // 1 = READ (fx68k eRWn is active-low)
   wire _cpuUDS = 0, _cpuLDS = 0;   // word access
 
@@ -158,6 +163,14 @@ module tb_ramwin;
   reg [20:0]  chk_expect;
   reg [1:0]   chk_owner;   // 0=cpu 1=video 2=audio
 
+  // ---- video-lossless oracle (desktop phase) ----
+  // Every requested video word (raw_loadPixels tick) must be FETCHED
+  // EXACTLY ONCE, in order. A suppressed (CPU-won) tick currently DROPS
+  // the word while videoAddr advances -> the request is left in the FIFO
+  // -> mismatch + nonzero final depth = the desktop scramble.
+  reg [20:0] req_q [0:VID_FIFO-1];
+  integer req_head = 0, req_tail = 0, req_depth = 0, vid_requests = 0;
+
   integer ticks = 0;
   integer fails = 0, cpu_fetches = 0, cpu_ok = 0, vid_fetches = 0, vid_ok = 0,
           snd_fetches = 0, snd_ok = 0;
@@ -173,6 +186,19 @@ module tb_ramwin;
             2'd2: snd_ok = snd_ok + 1;
             default: ;
           endcase
+          // video-lossless: a serviced video fetch must be the OLDEST
+          // still-unfetched requested word (order-preserving, no skips)
+          if (chk_owner == 2'd1 && req_depth > 0) begin
+            if (rd_addr[20:0] == req_q[req_head]) begin
+              req_head  = (req_head + 1) % VID_FIFO;
+              req_depth = req_depth - 1;
+            end else begin
+              fails = fails + 1;
+              if (fails <= 12)
+                $display("*** VIDEO FIFO MISMATCH @tick %0d: fetched=%06h expect=%06h depth=%0d",
+                         ticks, rd_addr[20:0], req_q[req_head], req_depth);
+            end
+          end
         end else begin
           fails = fails + 1;
           if (fails <= 12)
@@ -181,6 +207,27 @@ module tb_ramwin;
                      raw_loadPixels, raw_loadSound, videoBusControl);
         end
         chk_pending = 1'b0;
+      end
+
+      // ---- video-lossless: record every requested video word ----
+      // Scoped to the desktop duty window (phase 3): a request is a
+      // phase-2 tick with raw video DMA demand, and the word MUST be
+      // fetched exactly once eventually (right now or after a
+      // collision delay). A suppressed tick that is never re-issued
+      // strands the request in the FIFO (detected at run end).
+      if (ready && (phase == 3'd2) && raw_loadPixels &&
+          (ticks >= PHASE3_OFF) && (ticks < DUTY_END)) begin
+        vid_requests = vid_requests + 1;
+        if (req_depth < VID_FIFO) begin
+          req_q[req_tail] = videoAddr;
+          req_tail = (req_tail + 1) % VID_FIFO;
+          req_depth = req_depth + 1;
+        end else begin
+          fails = fails + 1;
+          if (fails <= 12)
+            $display("*** VIDEO FIFO OVERFLOW @tick %0d: requested word %06h never fetched (depth=%0d)",
+                     ticks, videoAddr, req_depth);
+        end
       end
 
       // ---- classify the phase-2 tick ending NOW (FSM decides here too) ----
@@ -211,9 +258,13 @@ module tb_ramwin;
         $display("===================================================");
         $display("ticks=%0d  cpu-fetches=%0d ok=%0d  video-fetches=%0d ok=%0d  audio-fetches=%0d ok=%0d",
                  ticks, cpu_fetches, cpu_ok, vid_fetches, vid_ok, snd_fetches, snd_ok);
+        $display("video-requests(desktop)=%0d  fifo-depth-at-end=%0d (unfetched video words)",
+                 vid_requests, req_depth);
         $display("MISMATCHES: %0d", fails);
-        if (fails == 0 && cpu_fetches > 0)
-          $display("RESULT: PASS - every CPU RAM access wins its phase-2 SDRAM slot");
+        if (fails == 0 && cpu_fetches > 0 && req_depth == 0)
+          $display("RESULT: PASS - CPU wins every slot AND video is lossless (every requested word fetched exactly once)");
+        else if (req_depth > 0)
+          $display("RESULT: FAIL - video is LOSSY: %0d requested word(s) were dropped (CPU won the slot, video word never re-issued) -> desktop scramble", req_depth);
         else if (fails > 0)
           $display("RESULT: FAIL - %0d fetch(es) not serviced for the requesting owner", fails);
         else
@@ -230,10 +281,36 @@ module tb_ramwin;
     reset = 0;
     wait (ready);            // sdram init done (31 cycles)
     repeat (4) @(posedge clk);
-    // deassert the fake CPU read after the first half (CPU idle; video only).
-    // Off-set from clock edges to avoid decode races.
+
+    // PHASE 1 (0..CPU_OFF): continuous CPU word read of $00003E, /AS low.
+    //   (unchanged from the original collision test)
+    // PHASE 2 (CPU_OFF..PHASE3_OFF): CPU idle, /AS high, video-only.
     #(5*CPU_OFF + 2);
     _cpuAS = 1'b1;
+    repeat (PHASE3_OFF - CPU_OFF) @(posedge clk);
+
+    // PHASE 3 (PHASE3_OFF..DUTY_END): the DESKTOP PATTERN — a ~50%-duty
+    // stream of 68k instruction/operand RAM reads: /AS low ~DUTY_TICKS
+    // ticks (access in flight, address cycling through RAM words), /AS
+    // high ~DUTY_TICKS ticks (gap between accesses). With the 68k<->grid
+    // drift, roughly half of all video fetch ticks collide with an
+    // in-flight CPU RAM access.
+    forever begin
+      _cpuAS = 1'b0;
+      repeat (DUTY_TICKS) @(posedge clk);
+      _cpuAS = 1'b1;
+      repeat (DUTY_TICKS) @(posedge clk);
+      cpu_cycle = cpu_cycle + 1;
+    end
+    // (the forever loop is outrun by the ticks==RUN_TICKS $finish; the
+    //  address cycling below is observed combinationally)
+  end
+
+  // fake-68k address cycling: advance one word per tick while in phase 3
+  // /AS-low periods (the 68k is fetching consecutive instructions/data)
+  always @(posedge clk) begin
+    if (!reset && _cpuAS == 1'b0 && (ticks >= PHASE3_OFF))
+      cpuAddr <= cpuAddr + 23'd1;
   end
 
 endmodule
