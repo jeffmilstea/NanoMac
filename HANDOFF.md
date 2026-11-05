@@ -956,6 +956,124 @@ reproduced the ORIGINAL hang signature with cache ON.
   to restore cache use: the freeze must be root-caused first, or the cache
   can never be left on for the Speedometer benchmark.
 
+### ROOT CAUSE of the cache-on freeze (2026-11-04 session): the ROM crash
+handler runs against a MISSING A23-RAM mirror + interrupt-vector mirror
+(reimplementation gap in addrDecoder). Option A is NOT the problem.
+FIX IMPLEMENTED + SIM-VALIDATED (see "FIX IMPLEMENTED" below; NOT yet
+built/flashed).
+- **Board re-set:** re-flash (openFPGALoader -f) = FPGA re-init, i.e. a
+  power-cycle substitute (user cannot reach the switch). Booted to Finder
+  (scrambled), stock. Canary (trigset 4 + arm + 30s + dump) = pos=0.
+- **Fresh freeze capture** (trigger = first write to $000004,
+  `trigset 3 0x000004 0xFFFFFF`, fired ~1 min after poke 4):
+  /tmp/hang3_freeze_trig.vcd, decode /tmp/hang3_decode2.txt.
+  1. **Option A WORKS on the board** — refutes hypothesis (a): every
+     active CPU RAM access (AS=0, RM=1) in the window owns its SDRAM
+     fetch (SADR==A>>1, ram_req=1), incl. all vector installs
+     (W $000002/$000004/$000006 serviced). The "STOLEN" rows with
+     RQ=0 are the 1-cycle rd_addr pipeline (SADR still shows the
+     PREVIOUS fetch) — not a theft.
+  2. **Crash = an exception loop**: repeating auto vector fetches
+     (R $00002C/$00002E = vector 14 "supervisor illegal instr",
+     R $000010/$000012 = vector 4 "line 1010"), handler Ws
+     $000002/$000004/$000006, handler reads $8FF000 + $8FF002 (one
+     long read), handler RMWs at $FFFFFC/$FFFFFE, $FFFFFA, $FFFFF6,
+     $FFFFF8. Park at $EFFC14 (VIA window) AS=1, SADR walking —
+     the kill shot is AFTER this buffer's window; mode 4 (in the
+     flashed build) would have held the last 64 pre-silence samples.
+- **THE HOLE (real Mac Plus map vs NanoMac addrDecoder.v casez):**
+  - `$800000-$BFFFFF` = A23 RAM mirror of `$000000-$3FFFFF` (real RAM
+    on the Mac Plus; A23 = cpuAddr[23] = the case bit [23]). The
+    handler's `$8FF000` long read = crash-log area in high RAM.
+    NanoMac: `4'b10xx` fell into `default: select nothing` (unchanged
+    since initial commit c6b1467).
+  - `$FFFFE0-$FFFFFF` = interrupt-vector mirror = first 32 bytes of
+    RAM (vector n at $FFFFE0+4n; the 68k vector table, vector 0 =
+    reset at $FFFFE0). The handler RMWs there to INSTALL its vectors.
+    NanoMac: also `select nothing`.
+  - Consequence of `select nothing`: _ramOE/_ramWE inactive -> NO
+    SDRAM fetch (trace: RQ=0, SADR stale 000009 / walking video
+    1FF2D7); cpuDataOut (dataController.sv:322) falls through to
+    `ramDataIn` = STALE SDRAM bus data (video words / previous CPU
+    words) -> reads return garbage; writes vanish.
+  - => handler reads a garbage crash-log header, its vector installs
+    vanish, it follows a corrupted computed path -> bad jump -> park.
+    **The loop can never resolve: the handler is deaf and blind.**
+  - HOLE IS LATENT: addrController.v:148 already maps A18 into
+    ramAddr (4MB = 2x2MB mirror), so ONLY the decode selection is
+    missing. Nothing touched these windows until a ROM crash handler
+    ran, which requires a first exception, which (under cache-on)
+    lands ~1 min after enable.
+- **Why sim never saw it:** sim RAM model (nanomac_tb.cpp:305
+  `ram[a>>1]`, oracle_mem_word:348) has NO mirror and sim never takes
+  a first exception. Same gap class as the video-theft sim hole.
+- **⚠️ BIT-POSITION CORRECTIONS (caught in this session — do not
+  re-introduce):**
+  - `cpuAddr` is [23:1] = {A23..A1}: **A23 = cpuAddr[23]** (NOT
+    [22]; [22]=A22 — a `cpuAddr[22]==1` exclusion covers $400000-
+    $7FFFFF = all of ROM and kills the cache: hits=0, caught by the
+    regression).
+  - The 68k vector table is **$FFFFE0-$FFFFFF** (32 bytes, 16
+    words), NOT $FFFFF0-$FFFFFE. Window = A23..A5 all 1
+    (cpuAddr[23:5]==19'h7FFFF); word = cpuAddr[4:1]. The handler's
+    observed RMWs confirm it: $FFFFF6/$FFFFF8 = vector 6 (A-line,
+    word $C), $FFFFFA/$FFFFFC = vector 7 (illegal-instr, word $E),
+    $FFFFFE = vector 8 (word $F).
+  - A23 mirror needs NO remap: the RAM word is already
+    cpuAddr[21:1], which drops A23 (and A22) — $8FF000 -> word
+    $07F800 = the true alias of $0FF000.
+- **FIX IMPLEMENTED (working tree, SIM-VALIDATED; NOT built/flashed):**
+  1. addrDecoder.v: new `configRAMSize` input port; `4'b1000`
+     ($800000-$8FFFFF) -> selectRAM for configRAMSize[1] (1MB+);
+     `4'b1010`/`4'b1011` ($A00000/$B00000) -> selectRAM for 4MB
+     only; `4'b1111` gains `address[19:5]==15'h7FFF` -> selectRAM
+     (the $FFFFE0-$FFFFFF vector mirror, checked before the F80000
+     HW-regs test).
+  2. addrController.v: `cpuRamWord = (cpuAddr[23:5]==19'h7FFFF) ?
+     cpuAddr[4:1] : cpuAddr[21:1]`; addrMux uses cpuRamWord instead
+     of cpuAddr[21:1]; addrDecoder instance now gets
+     .configRAMSize(configRAMSize).
+  3. macplus.sv: `ram_mirror_alias = (cpuAddr[23]==1) ||
+     (cpuAddr[23:5]==19'h7FFFF) || (cpuAddr[19:1]==19'b0)`;
+     `cache_cacheable` gains `&& !ram_mirror_alias`. Rationale: a
+     write through one alias ($8FF000) would not invalidate the
+     other alias's cached line ($0FF000, different tag) -> stale
+     reads; so BOTH mirror sides AND the low 16 words (the vector
+     table they alias) bypass the cache. Cost: negligible (only the
+     ROM crash handler + the cold-boot vector install, which happens
+     cache-off, touch these windows).
+  4. sim/tb_mirror.sv (NEW): mirror oracle, 23 cases. RED on
+     unfixed RTL (22 fails: "selectRAM never asserts" on all mirror
+     cases); GREEN after the fix (all pass, 48-96 valid samples
+     each). Build: verilator -j 4 --timing --binary -Wno-lint
+     -Wno-fatal -top-module tb_mirror -Mdir obj_mirror
+     ../src/macplus/{clocks,addrDecoder,videoTimer,addrController}.v
+     tb_mirror.sv
+- **SIM VALIDATION (2026-11-04/05, all green):**
+  - tb_mirror: PASS 23/23.
+  - Full-machine cache ON: hits rate matches baseline (9.7M/10s),
+    bad=0, fills=65535 (saturated), diagPh6NoHit=0.
+  - Full-machine cache OFF: bad=0, healthy (19.4M diagPh6/15s).
+  - tb_ramwin (Option A collision) re-run against the modified RTL:
+    PASS (cpu 125/125, video 127/127, audio 3/3, 0 mismatches).
+- **STILL TO DO (board, after this commit):**
+  1. FPGA build: cd src && bash build.sh
+  2. bash scripts/flash_board.sh src/impl/pnr/nanomac.fs -f
+     (re-flash = board reset; user cannot power-cycle physically)
+  3. Board confirm: settle to stock desktop, canary (trigset 4 +
+     arm + 30s + dump -> pos=0), then poke 4 (cache on) and watch
+     5+ min: expect NO freeze (handler now functional). Re-arm mode 4
+     during the wait to capture any surviving hang (Q1 first
+     exception: with a working handler the machine should now LOG
+     the real crash and possibly recover; if it still parks, the
+     mode-4 dump holds the kill shot and the handler's crash log at
+     $8FF000+ is now readable via peek/SADR).
+  4. Video-lossless (A2) work per NEXT step 4 is UNCHANGED and
+     independent.
+- **Board state at this note:** board last seen FRESH (re-flashed
+  2026-11-04 ~01:51 UTC, stock, scrambled video, CPU alive);
+  simulator carries the mirror fix, board does NOT yet.
+
 ### OPTION A IMPLEMENTED + SIM-VALIDATED (2026-11-03 session)
 - **Deterministic collision TB (sim/tb_ramwin.sv)**: real clocks +
   addrDecoder + videoTimer + addrController + board sdram.v FSM. Fake
@@ -1177,36 +1295,36 @@ ILA: clk_pixel, 256x64 trace, probe map v2 (see "Probe map v2" above;
 - Timing report violations are a red herring (SDC only constrains clk_osc).
 - context limit 262k; this handoff doc is the recovery point.
 
-## FRESH-SESSION PROMPT (paste as first message 2026-11-04+)
-Read HANDOFF.md: (1) "CORRECTION (2026-11-03 ~23:45 UTC): the 'no
-freeze / CPU fixed' claim was WRONG for cache-ON" first, (2) then
-"OPTION A IMPLEMENTED + SIM-VALIDATED", (3) then the hang.vcd decode
-section above it.
+## FRESH-SESSION PROMPT (paste as first message 2026-11-05+)
+Read HANDOFF.md: (1) "ROOT CAUSE of the cache-on freeze (2026-11-04
+session): the ROM crash handler runs against a MISSING A18-RAM mirror
++ vector-table mirror" first, (2) then "CORRECTION (2026-11-03
+~23:45 UTC): the 'no freeze / CPU fixed' claim was WRONG for
+cache-ON", (3) then "OPTION A IMPLEMENTED + SIM-VALIDATED".
 
-STATE: Option A (CPU wins the phase-2 SDRAM fetch slot) is built +
-flashed (commits 9e4e250, 37317a0, docs 0638d13). TWO independent
-bugs are live on the board, both confirmed by board triage 2026-11-03
-evening (ICE port /dev/cu.usbserial-20230306211):
+STATE (2026-11-04): Option A (CPU wins the phase-2 SDRAM fetch slot) is
+built + flashed (commits 9e4e250, 37317a0, docs 0638d13). TWO live
+bugs, plus the freeze root cause now identified:
 (1) VIDEO SCRAMBLE (stock, cache OFF, no pokes): full-screen 50/50
-    black/white horizontal-tear noise (images/frame_optiona_scramble.png).
-    CONFIRMED via A/B: poke 8 (hw_video_off) -> solid black, poke 0 ->
-    noise returns. Diagnosis: cpu_mem_acc (addrController.v:125) is
-    high whenever the 68k is in an in-flight RAM access; at the desktop
-    that's ~50% of video fetch ticks -> the video word is DROPPED while
-    the combinational videoAddr (videoTimer.v:62) advances anyway ->
-    shifter desync per dropped word. Fix = lossless video (A2 registered
-    fetch counter), after a sim pixel-stream oracle.
-(2) CACHE-ON HARD FREEZE (the ORIGINAL hang, NOT fixed by Option A):
-    poke 4 (cache on, video on) -> within ~1-2 min the CPU parks at
-    $00003E, AS=1, RW:R, RM:0, SADR walking (video alive) - the exact
-    hang.vcd signature. The "clean desktop" seen at freeze is a FROZEN
-    FRAME (CPU dead -> no slot theft -> video redraws the last frame).
-    "No freeze" was only ever observed in cache-OFF boot. Open
-    hypotheses: (a) Option A's collision path is not actually closed on
-    the board, or (b) the freeze is the Q1 first-exception (a separate
-    bug) whose handler's final vector read is the kill shot.
-    Discriminator = capture the first vector write: trigset 3 0x000004
-    0xFFFFFF. Board is FROZEN as of session end; recovery = power cycle.
+    black/white noise (images/frame_optiona_scramble.png). CONFIRMED via
+    A/B (poke 8 -> solid black, poke 0 -> noise). Diagnosis: cpu_mem_acc
+    (addrController.v:125) high during in-flight 68k RAM accesses -> ~50%
+    of video fetch ticks drop the word while combinational videoAddr
+    (videoTimer.v:62) advances anyway -> shifter desync per drop.
+    Fix = lossless video (A2 registered fetch counter), after a sim
+    pixel-stream oracle.
+(2) CACHE-ON HARD FREEZE — ROOT CAUSE FOUND (see "ROOT CAUSE of the
+    cache-on freeze" section): Option A works on the board (every
+    active CPU RAM access owns its fetch — hypothesis (a) REFUTED by
+    /tmp/hang3_freeze_trig.vcd). The freeze = a first exception (Q1,
+    origin still unknown) ~1 min after cache enable; the genuine ROM
+    crash handler then runs against the MISSING A18-RAM mirror
+    ($800000-$BFFFFF) and vector-table mirror ($FFFFF0-$FFFFFF) in
+    addrDecoder.v (select nothing -> stale data reads, vanishing
+    vector installs) -> handler runs blind -> corrupted jump -> park
+    (AS=1, SADR walking; "clean desktop" at freeze = frozen frame).
+    Q1 (first-exception origin) is now the OPEN item; the mirror fix
+    must be sim-validated first.
 
 DIAGNOSIS (high confidence, NOT yet proven in sim): /AS is
 ACTIVE-LOW, so the Option-A gate `cpu_mem_acc = selectRAM && !_cpuAS`
@@ -1229,21 +1347,20 @@ AS-low (all ticks CPU-expected; lost video words uncounted) or 100%
 AS-high (no collisions) - it never models the ~50%-duty desktop
 pattern - and nanomac_tb has NO pixel-stream oracle at all.
 
-NEXT (in order; updated 2026-11-03 evening after re-triage):
-1. BOARD TRIAGE - DONE (2026-11-03 evening, see CORRECTION section):
-   video theft confirmed (poke 8 -> solid black, poke 0 -> noise back);
-   cache-on freeze REPRODUCED (poke 4 -> park at $00003E, AS=1, SADR
-   walking; hit/miss/fill counters FFFF; /tmp/hang2_optiona_cacheon.vcd).
-   Board left FROZEN -> needs POWER CYCLE before any further work.
-2. FREEZE FIRST (blocks all cache use; must precede the benchmark):
-   power cycle, settle to stock desktop (scrambled, CPU alive), canary
-   (trigset 4 + arm + 30s + dump -> pos=0), then `trigset 3 0x000004
-   0xFFFFFF` (first vector-table write) + arm + `poke 4` + wait ~2 min
-   + dump. Decode: (a) $00003E read serviced in pre-hang window (SADR
-   reaches 00001F) => freeze is Q1 separate-exception trigger; (b)
-   $00003E read never serviced again => Option A's collision path is
-   NOT closed on the board (sim/tb_ramwin says PASS but board says
-   FAIL -> find the divergence). Decide direction from that evidence.
+NEXT (in order; updated 2026-11-04 after root-cause session):
+1. DONE (2026-11-03/04): board triage (video theft A/B confirmed; cache-on
+   freeze reproduced + re-flashed board recovered via re-flash as a
+   power-cycle substitute) and freeze root cause (see ROOT CAUSE
+   section): Option A refuted as the cause; missing A18/vector mirror is
+   the cause; Q1 = first-exception origin still open.
+2. MIRROR FIX - DONE in sim (2026-11-04/05; see ROOT CAUSE section):
+   tb_mirror 23/23 PASS, full regression green (cache on/off),
+   tb_ramwin re-pass. Working tree: addrDecoder.v + addrController.v
+   + macplus.sv + sim/tb_mirror.sv. Board does NOT have the fix yet.
+   NEXT: build (cd src && bash build.sh) -> flash -f -> board
+   confirm: settle, canary, poke 4, 5+ min NO freeze; re-arm mode 4
+   to capture any surviving hang (Q1: the handler can now LOG the
+   real first-exception crash log at $8FF000+).
 3. SIM FIRST - a pixel-stream oracle is mandatory before any video
    RTL change:
    (a) tb_ramwin.sv: add a third phase where the fake 68k does

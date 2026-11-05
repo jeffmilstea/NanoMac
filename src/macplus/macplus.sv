@@ -404,8 +404,20 @@ assign mac_probes = {
 // a not-yet-swept line aliases a live address -> false hit -> the boot ROM
 // reads garbage in its first ~1024 grid cycles -> stripey-bars crash.
 wire cache_in_sweep = (cache_inv_cnt != 11'd0);
+// Mirror-alias exclusion (Mac Plus A23 RAM mirror + vector mirror):
+// an aliased pair (e.g. $8FF000 == $0FF000, or $FFFFF8 == $00000C) maps
+// to the same RAM word but a DIFFERENT cache tag, so a write through one
+// alias would not invalidate the other's cached line -> stale reads.
+// The mirror sides and the low 16 words (the vector table they alias)
+// therefore bypass the cache. Cost is negligible: only the ROM crash
+// handler (rare) and the cold-boot vector install (once, cache off)
+// touch these windows.
+wire ram_mirror_alias =
+    (cpuAddr[23] == 1'b1)                 // $800000-$BFFFFF (A23 mirror side)
+ || (cpuAddr[23:5] == 19'h7FFFF)          // $FFFFE0-$FFFFFF (vector mirror side)
+ || (cpuAddr[19:1] == 19'b0);             // $000000-$00001E (low vector words)
 wire        cache_cacheable = (configCache || hw_cache_en) && (selectROM || selectRAM) &&
-                              !memoryOverlayOn && !cache_in_sweep;
+                              !memoryOverlayOn && !cache_in_sweep && !ram_mirror_alias;
 
 // Effective video/audio DMA loads after Option-A arbitration (CPU wins)
 // and the hw_video_off test switch. The shifter/audio in dataController

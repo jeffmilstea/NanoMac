@@ -81,6 +81,7 @@
 
 module addrDecoder(
 	input [1:0] configROMSize,
+	input [1:0] configRAMSize,
 	input [23:1] address,
 	input _cpuAS,
 	input memoryOverlayOn,
@@ -127,9 +128,38 @@ module addrDecoder(
 					selectSCSI = !_cpuAS;
 				selectSEOverlay = !_cpuAS;
 			end
-			4'b0110: 
+			4'b0110:
 				if (memoryOverlayOn)
 					selectRAM = !_cpuAS;
+			// Mac Plus RAM mirrors: $800000-$BFFFFF alias $000000-$3FFFFF.
+			// address = cpuAddr[23:1], so case word [23:20] = {A23,A22,A21,A20}
+			// and 4'b10xx is A23=1. No addrMux remap is needed: the RAM word
+			// address is already cpuAddr[21:1], which drops A23 and A22.
+			4'b1000: begin // $800000-$8FFFFF (A23 mirror of $000000-$0FFFFF)
+				if (configRAMSize[1])
+					selectRAM = !_cpuAS;          // 1MB/4MB boards
+			end
+			4'b1010: begin // $A00000-$AFFFFF (A22 mirror)
+				if (configRAMSize == 2'b11)       // 4MB boards only
+					selectRAM = !_cpuAS;
+			end
+			4'b1011: begin // $B00000-$BFFFFF (A23+A22 mirror)
+				if (configRAMSize == 2'b11)       // 4MB boards only
+					selectRAM = !_cpuAS;
+			end
+			// Mac Plus interrupt-vector mirror: $FFFFE0-$FFFFFF alias the
+			// first 16 RAM words (the 32 interrupt-vector bytes, vector n
+			// at $FFFFE0+4n). The System ROM crash handler updates vectors
+			// through this window (observed RMWs at $FFFFF6-$FFFFFE), so it
+			// MUST decode as RAM (was "select nothing" since the initial
+			// commit -> handler ran blind -> hard freeze, /tmp/hang3 trace).
+			// addrController remaps the word address to cpuAddr[4:1].
+			4'b1111: begin // F0 0000 - FF FFFF
+				if (address[19:5] == 15'h7FFF)
+					selectRAM = !_cpuAS;          // $FFFFE0-$FFFFFF (16 word addrs)
+				else if (address[19:16] == 4'h8 && address[15:5] == 11'h0) // F8 0000 - F8 001F: NanoMac HW registers (8 words)
+					selectHardwareRegs = !_cpuAS;
+			end
 			4'b10?1:
 				selectSCC = !_cpuAS;
 			4'b1100: // C0 000 - CF FFF
@@ -140,10 +170,6 @@ module addrDecoder(
 			4'b1110:
 				if (address[19]) // E8 000 - EF FFF
 					selectVIA = !_cpuAS;
-			4'b1111: begin // F0 0000 - FF FFFF: test software & diagnostic space
-				if (address[19:16] == 4'h8 && address[15:5] == 11'h0) // F8 0000 - F8 001F: NanoMac HW registers (8 words)
-					selectHardwareRegs = !_cpuAS;
-			end
 			default:
 				; // select nothing
 		endcase

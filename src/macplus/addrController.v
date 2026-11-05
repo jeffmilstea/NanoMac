@@ -140,8 +140,16 @@ module addrController (
 	assign _memoryUDS = va_ram_access?1'b0:_cpuUDS;
 	assign _memoryLDS = va_ram_access?1'b0:_cpuLDS;
 
+	       // Mac Plus interrupt-vector mirror: $FFFFE0-$FFFFFF (A23..A5 all 1,
+	       // A4..A1 = 0..15) alias the first 16 RAM words (the 32 vector
+	       // bytes). Without this the natural cpuAddr[21:1] would map them
+	       // to the TOP of RAM.
+	       wire [20:0] cpuRamWord = (cpuAddr[23:5] == 19'h7FFFF)
+	               ? cpuAddr[4:1]
+	               : cpuAddr[21:1];
+
 	       // three sources may address ram: video, audio or CPU (CPU wins ties)
-	wire [20:0] addrMux = lpx?videoAddr:lsnd?audioAddr:cpuAddr[21:1];
+	wire [20:0] addrMux = lpx?videoAddr:lsnd?audioAddr:cpuRamWord;
 
 	// simulate smaller RAM/ROM sizes
 	assign ramAddr = { configRAMSize != 2'b11   ? 2'b00 : addrMux[20:19],  // force A20/A19 to 0 for all but 4MB RAM access
@@ -158,6 +166,7 @@ module addrController (
 	// address decoding
 	addrDecoder ad(
 		.configROMSize(configROMSize),
+		.configRAMSize(configRAMSize),
 		.address(cpuAddr),
 		._cpuAS(_cpuAS),
 		.memoryOverlayOn(memoryOverlayOn),
