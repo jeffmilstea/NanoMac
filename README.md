@@ -22,7 +22,8 @@ Current state:
   * [Fully simulated](sim)
   * Two SCSI harddisks
   * Serial/WiFi modem support
-  * MIDI support	
+  * MIDI support
+  * In-Circuit Emulator (ICE), Logic Analyzer (ILA), and Remote Web KVM console ([User Guide](docs/ICE_ILA_KVM_GUIDE.md))	
 
 ## Videos
 
@@ -44,3 +45,10 @@ Current state:
      * Running the [FPGA Companion firmware](http://github.com/harbaum/FPGA-Companion)
   * At least one disk image in ```DSK``` format (819200 bytes in in size) containing e.g. [System 3.0](https://winworldpc.com/product/mac-os-0-6/system-3x) has to be placed on an SD card
   * Optionally add a SCSI harddisk image like [MacPack's boot.vhd](https://archive.org/details/macpack)
+
+## AI Implementation & Development Attribution
+
+The codebase modifications, HDL modules, and testing infrastructure in this fork were authored by [Google Gemini](https://gemini.google.com/), operating under human direction and architectural oversight.
+
+- **Implementation (Google Gemini):** Authored all new and modified Verilog/RTL code, Verilator testbenches, Python test harnesses, and documentation.
+- **Direction & Validation (@jeffmilstea):** Defined requirements, directed feature implementations, set architectural constraints, debugged system integration, and tested/verified all generated deliverables on hardware and in simulation.

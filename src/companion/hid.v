@@ -26,14 +26,23 @@ module hid (
   output [9:0]     kbd_data,
 
   output reg [7:0] joystick0,
-  output reg [7:0] joystick1
+  output reg [7:0] joystick1,
+
+  // ICE UART mouse & keyboard injection (active in parallel with USB HID)
+  input            ice_mouse_strobe,
+  input [7:0]      ice_mouse_btn,
+  input [7:0]      ice_mouse_dx,
+  input [7:0]      ice_mouse_dy,
+  input            ice_kbd_strobe,
+  input [7:0]      ice_kbd_data
 );
 
 reg mouse_btn;
+reg ice_mouse_btn_r;
 reg [1:0] mouse_x;
 reg [1:0] mouse_y;
 
-assign mouse = { ~mouse_btn, mouse_x, mouse_y };
+assign mouse = { ~(mouse_btn | ice_mouse_btn_r), mouse_x, mouse_y };
 
 reg [11:0] mouse_div;
 reg [7:0] mouse_x_cnt;
@@ -64,10 +73,17 @@ always @(posedge clk) begin
    if(reset) begin
       state <= 4'd0;
       mouse_div <= 12'd0;
+      mouse_btn <= 1'b0;
+      ice_mouse_btn_r <= 1'b0;
+      mouse_x <= 2'b00;
+      mouse_y <= 2'b00;
+      mouse_x_cnt <= 8'd0;
+      mouse_y_cnt <= 8'd0;
       irq <= 1'b0;
       irq_enable <= 1'b0;
       kbd_strobe <= 1'b0;
-      kbd_data_in <= 8'h00;      
+      kbd_trigger <= 1'b0;
+      kbd_data_in <= 10'h000;      
    end else begin
       db9_portD <= db9_port;
       db9_portD2 <= db9_portD;
@@ -77,6 +93,11 @@ always @(posedge clk) begin
 	   kbd_strobe <= !kbd_strobe;		 
 
 	 kbd_trigger <= 1'b0;
+      end
+
+      if(ice_kbd_strobe) begin
+         kbd_data_in <= {2'b00, ice_kbd_data};
+         kbd_trigger <= 1'b1;
       end
       
       // monitor db9 port for changes and raise interrupt
@@ -91,7 +112,12 @@ always @(posedge clk) begin
 
       if(iack) irq <= 1'b0;      // iack clears interrupt
 
-      if(data_in_strobe) begin      
+      if(ice_mouse_strobe) begin
+        if(ice_mouse_btn != 8'hFF)
+            ice_mouse_btn_r <= ice_mouse_btn[0];
+        mouse_x_cnt <= mouse_x_cnt + ice_mouse_dx;
+        mouse_y_cnt <= mouse_y_cnt + ice_mouse_dy;
+      end else if(data_in_strobe) begin      
         if(data_in_start) begin
             state <= 4'd0;
             command <= data_in;

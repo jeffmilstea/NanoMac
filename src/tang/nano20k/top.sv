@@ -128,11 +128,31 @@ wire cpu_bus_idle = _cpuAS_probe && (phase == 3'd7);
 wire hw_turbo_ovr_top, hw_turbo_en_top;
 wire [1:0] turbo_eff = hw_turbo_ovr_top ? {2{hw_turbo_en_top}} : osd_turbo;
 reg [1:0] turbo_synced = 2'b00;
+reg       cache_synced = 1'b0;
 always @(posedge clk_pixel or negedge hdmi_pll_lock) begin
-    if (!hdmi_pll_lock || cpu_reset)
+    if (!hdmi_pll_lock || cpu_reset) begin
         turbo_synced <= 2'b00;
-    else if (cpu_bus_idle)
+        cache_synced <= 1'b0;
+    end else if (cpu_bus_idle) begin
         turbo_synced <= turbo_eff;
+        cache_synced <= osd_cache;
+    end
+end
+
+// Clear hw_turbo_ovr automatically whenever the user changes Turbo or Cache in the OSD menu
+reg [1:0] osd_turbo_d;
+reg       osd_cache_d;
+reg       osd_ovr_clr;
+always @(posedge clk_pixel) begin
+    if (!pll_lock) begin
+        osd_turbo_d <= osd_turbo;
+        osd_cache_d <= osd_cache;
+        osd_ovr_clr <= 1'b0;
+    end else begin
+        osd_turbo_d <= osd_turbo;
+        osd_cache_d <= osd_cache;
+        osd_ovr_clr <= (osd_turbo != osd_turbo_d) || (osd_cache != osd_cache_d);
+    end
 end
 
 // Dynamic clock selector: Stock = clk_pixel (15.6672 MHz), Turbo = clk_cpu_raw (39.168 MHz)
@@ -256,10 +276,17 @@ mcu_spi mcu (
 // On-Chip ILA & ICE Debugger Core
 // -----------------------------------------------------------------------------
 wire [47:0] mac_probes;
-// ICE poke/peek + hw turbo override (clk_pixel domain, same as clk_sys)
+// ICE poke/peek + SDRAM DMA + hw turbo override (clk_pixel domain, same as clk_sys)
 wire        ice_poke_valid, ice_peek_req;
 wire [2:0]  ice_poke_idx, ice_peek_idx;
 wire [15:0] ice_poke_data, ice_peek_data;
+wire        ice_mem_busy, ice_mem_active, ice_mem_we;
+wire [20:0] ice_mem_addr;
+wire [15:0] ice_mem_wdata;
+wire        ice_mouse_strobe;
+wire [7:0]  ice_mouse_btn, ice_mouse_dx, ice_mouse_dy;
+wire        ice_kbd_strobe;
+wire [7:0]  ice_kbd_data;
 wire        cache_hit_probe;
 wire        cache_en_probe;
 wire        osd_cache_probe;      // raw configCache from OSD/MCU
@@ -320,7 +347,20 @@ ila ila_inst (
     .ice_poke_data      ( ice_poke_data      ),
     .ice_peek_req       ( ice_peek_req       ),
     .ice_peek_idx       ( ice_peek_idx       ),
-    .ice_peek_data      ( ice_peek_data      )
+    .ice_peek_data      ( ice_peek_data      ),
+    .bus_phase          ( phase              ),
+    .sdram_dout         ( sdram_dout         ),
+    .ice_mem_busy       ( ice_mem_busy       ),
+    .ice_mem_active     ( ice_mem_active     ),
+    .ice_mem_we         ( ice_mem_we         ),
+    .ice_mem_addr       ( ice_mem_addr       ),
+    .ice_mem_wdata      ( ice_mem_wdata      ),
+    .ice_mouse_strobe   ( ice_mouse_strobe   ),
+    .ice_mouse_btn      ( ice_mouse_btn      ),
+    .ice_mouse_dx       ( ice_mouse_dx       ),
+    .ice_mouse_dy       ( ice_mouse_dy       ),
+    .ice_kbd_strobe     ( ice_kbd_strobe     ),
+    .ice_kbd_data       ( ice_kbd_data       )
 );
 
 // decode SPI/MCU data received for human input devices (HID) and
@@ -358,7 +398,15 @@ hid hid (
         .kbd_data(kbd_data),
                  
         .joystick0(),
-        .joystick1()
+        .joystick1(),
+
+        // ICE UART mouse & keyboard injection
+        .ice_mouse_strobe(ice_mouse_strobe),
+        .ice_mouse_btn(ice_mouse_btn),
+        .ice_mouse_dx(ice_mouse_dx),
+        .ice_mouse_dy(ice_mouse_dy),
+        .ice_kbd_strobe(ice_kbd_strobe),
+        .ice_kbd_data(ice_kbd_data)
          );
 
 // switch between internal wifi and external (midi)   
@@ -493,15 +541,28 @@ osd_u8g2  #(.H_OFFSET(86)) osd_u8g2 (
 
 /* -------------------- Tang Nano 20k SDRAM -------------------- */
 wire [15:0] sdram_dout;
-wire [15:0] sdram_din;
-wire		sdram_oe;
-wire		sdram_we;
+wire [15:0] mac_sdram_din;
+wire		mac_sdram_oe;
+wire		mac_sdram_we;
 wire		sdram_rd_done;
 wire [21:0] sdram_rd_addr_m; // SDRAM FSM mapped read address (22-bit)
 // de-map to CPU word address (inverse of .addr({1'b0,ram_addr[20:2],ram_addr[1:0]^osd_memory}))
 wire [20:0] sdram_rd_addr = { sdram_rd_addr_m[20:2], sdram_rd_addr_m[1:0] ^ osd_memory };
-wire [1:0]  sdram_ds;
-wire [20:0] ram_addr;
+wire [1:0]  mac_sdram_ds;
+wire [20:0] mac_ram_addr;
+
+// ICE SDRAM DMA mux (applies same osd_memory bank mask as addrController.v)
+wire [20:0] ice_ram_addr_masked = {
+    (osd_memory != 2'b11)   ? 2'b00 : ice_mem_addr[20:19],
+    (osd_memory[1] == 1'b0) ? 1'b0  : ice_mem_addr[18],
+    (osd_memory == 2'b00)   ? 2'b00 : ice_mem_addr[17:16],
+    ice_mem_addr[15:0]
+};
+wire [20:0] ram_addr  = ice_mem_active ? ice_ram_addr_masked : mac_ram_addr;
+wire [15:0] sdram_din = ice_mem_active ? ice_mem_wdata       : mac_sdram_din;
+wire [1:0]  sdram_ds  = ice_mem_active ? 2'b11               : mac_sdram_ds;
+wire        sdram_we  = ice_mem_active ?  ice_mem_we         : mac_sdram_we;
+wire        sdram_oe  = ice_mem_active ? !ice_mem_we         : mac_sdram_oe;
 
 // `define INT_RAM
 
@@ -652,7 +713,7 @@ macplus macplus (
     .configTurbo(turbo_synced),
     .configFloppyWProt(osd_floppy_wprot), // floppy disk write protections
     .configSCSIWProt(osd_hdd_wprot), // hdd/scsi disk write protection
-    .configCache(osd_cache),    // BRAM cache enable
+    .configCache(cache_synced),   // BRAM cache enable (bus-idle synchronized)
  
     // interface to sd card
     .sdc_image_size ( sdc_image_size ),
@@ -682,11 +743,11 @@ macplus macplus (
                  
     // interface to (sd)ram
     .busPhase(phase),
-    .ram_addr(ram_addr),
-    .sdram_din(sdram_din),  // data to sdram
-    .sdram_ds(sdram_ds),
-    .sdram_we(sdram_we),
-    .sdram_oe(sdram_oe),
+    .ram_addr(mac_ram_addr),
+    .sdram_din(mac_sdram_din),  // data to sdram
+    .sdram_ds(mac_sdram_ds),
+    .sdram_we(mac_sdram_we),
+    .sdram_oe(mac_sdram_oe),
     .sdram_do(sdram_dout),
     .sdram_rd_done(sdram_rd_done),
     .sdram_rd_addr(sdram_rd_addr),
@@ -710,11 +771,12 @@ macplus macplus (
     .enPhi1_gated( enPhi1_gated ),
     .enPhi2_gated( enPhi2_gated ),
     .cpu_reset_override( cpu_reset_override ),
+    .ice_mem_busy( ice_mem_busy ),
     .hw_turbo_en_o( hw_turbo_en_top ),
     .hw_turbo_ovr_o( hw_turbo_ovr_top ),
-    .ice_poke_valid( ice_poke_valid ),
-    .ice_poke_idx( ice_poke_idx ),
-    .ice_poke_data( ice_poke_data ),
+    .ice_poke_valid( ice_poke_valid || osd_ovr_clr ),
+    .ice_poke_idx( ice_poke_valid ? ice_poke_idx : 3'd2 ),
+    .ice_poke_data( ice_poke_valid ? ice_poke_data : 16'h5500 ),
     .ice_peek_req( ice_peek_req ),
     .ice_peek_idx( ice_peek_idx ),
     .ice_peek_data( ice_peek_data )

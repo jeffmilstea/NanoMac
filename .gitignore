@@ -15,6 +15,7 @@ src/impl/pnr/**
 *.orig
 obj_dir*/
 sim/obj_dir*/
+sim/obj_*/
 frame*.png
 *.raw
 *.bmp
@@ -30,6 +31,7 @@ sim/plusrom.*
 sim/*.mem
 sim/fx68k/
 sim/macplus_xml.hex
+src/plusrom.*
 src/plusrom_swapped.hex
 *.vvp
 screen_*.png

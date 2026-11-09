@@ -20,7 +20,7 @@ fi
 rm -rf obj_dir
 
 echo "Running Verilator..."
-verilator --cc --exe -Wall -Wno-fatal \
+verilator --cc --exe -Wall -Wno-fatal -Wno-ENUMVALUE \
     -Wno-BLKANDNBLK -Wno-MULTIDRIVEN -Wno-SYNCASYNCNET -Wno-COMBDLY \
     -Wno-UNOPTFLAT -Wno-CASEINCOMPLETE -Wno-CASEOVERLAP -Wno-CASEX \
     -Wno-UNUSEDSIGNAL -Wno-UNUSEDPARAM -Wno-PROCASSINIT -Wno-WIDTHEXPAND \
@@ -51,7 +51,7 @@ if command -v verilator >/dev/null 2>&1; then
 fi
 
 if [ -n "$VERILATOR_INC" ] && [ -d "$VERILATOR_INC" ]; then
-    clang++ -O2 -std=c++14 \
+    clang++ -O2 -std=gnu++20 \
         -Iobj_dir -I"$VERILATOR_INC" -I"$VERILATOR_INC/vltstd" \
         "$VERILATOR_INC/verilated.cpp" \
         "$VERILATOR_INC/verilated_threads.cpp" \

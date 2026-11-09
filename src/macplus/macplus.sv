@@ -123,7 +123,8 @@ module macplus
 	output		       enPhi2_raw,
 	input		       enPhi1_gated,
 	input		       enPhi2_gated,
-	input		       cpu_reset_override
+	input		       cpu_reset_override,
+	input		       ice_mem_busy
 );
 
 assign ADC_BUS  = 'Z;
@@ -220,12 +221,13 @@ wire loadSound;
 // only accept /AS for ram or rom if it comes in phase 2. Don't accept any later as as we would not
 // Memory cycle synchronization for normal and turbo modes
 wire	refreshCycle;
-// Option A (2026-11-03): the CPU RAM access must set ram_req on its OWN
-// phase-2 tick even when that tick falls in a video half (addrController
-// now lets the CPU win the SDRAM fetch slot there, lpx/lsnd gated).
-// Without this, the colliding read would never DTACK in time.
-wire	cpu_mem_acc = selectRAM && !_cpuAS;
-wire	cpu_slot = cpuBusControl || (!loadPixels && !loadSound && !refreshCycle) || cpu_mem_acc;
+// Clean TDM slot arbitration:
+// Video (loadPixels_eff), Audio (loadSound_eff), and Refresh (refreshCycle)
+// own their dedicated slots during videoBusControl. CPU accesses RAM during
+// cpuBusControl or during unused videoBusControl slots.
+wire	loadPixels_eff = loadPixels && !hw_video_off;
+wire	loadSound_eff  = loadSound  && !hw_video_off;
+wire	cpu_slot = (cpuBusControl || (!loadPixels_eff && !loadSound_eff && !refreshCycle)) && !ice_mem_busy;
 
 reg ram_req;
 reg rom_req;
@@ -242,9 +244,9 @@ always @(posedge clk_sys or posedge req_rst) begin
       io_synced   <= 1'b0;
       io_sync_cnt <= 3'd0;
    end else begin
-      if (busPhase == 3'd2 && selectRAM && cpu_slot)
+      if (busPhase == 3'd2 && selectRAM && cpu_slot && !cache_hit)
          ram_req <= 1'b1;
-      if (busPhase == 3'd2 && selectROM)
+      if (busPhase == 3'd2 && selectROM && !cache_hit)
          rom_req <= 1'b1;
       if (cpuFC != 3'b111 && !selectVIA && !selectRAM && !selectROM) begin
          io_req <= 1'b1;
@@ -263,8 +265,9 @@ assign      _cpuVPA = (cpuFC == 3'b111) ? 1'b0 : ~(!_cpuAS && selectVIA);
 // Turbo Mode Clock & DTACK Logic:
 // configTurbo = 0: Off (Stock 7.8336 MHz)
 // configTurbo != 0: Turbo (19.584 MHz nominal, 2.50x speedup)
-// If hw_turbo_ovr is asserted by software, software controls turbo; otherwise follow configTurbo.
-wire effective_turbo = hw_turbo_ovr ? hw_turbo_en : (configTurbo != 2'b00);
+// top.sv synchronizes (hw_turbo_ovr ? hw_turbo_en : osd_turbo) at cpu_bus_idle into configTurbo
+// so that macplus and the Gowin DCS clock mux switch on the exact same cycle.
+wire effective_turbo = (configTurbo != 2'b00);
 wire cpu_turbo_active = effective_turbo;
 
 // -------------------------------------------------------------------------
@@ -308,40 +311,27 @@ assign      cache_en_cfg_probe = cache_en_cfg;
 // -------------------------------------------------------------------------
 // VIA 6522 E-Clock Strobe Synchronizer
 // -------------------------------------------------------------------------
-// In Stock Mode: fx68k.E_PosClkEn / fx68k.E_NegClkEn are directly on clk_sys.
-// In Turbo Mode: fx68k is on clk_cpu (39.168 MHz), so toggle synchronizer bridges
-// the single-cycle E-clock phase enables cleanly into the clk_sys domain.
+// fx68k outputs the continuous 68000 E clock (1/10th CPU frequency, 60% low, 40% high).
+// In both Stock (7.83 MHz) and Turbo (19.58 MHz) modes, E spans multiple clk_sys ticks.
+// Synchronizing fx68k.E directly into clk_sys and edge-detecting ensures:
+// 1. via_e_rising and via_e_falling strictly alternate with zero chance of double-pulsing.
+// 2. Seamless live mode switching without pulse loss or toggle-state corruption.
+wire fx68k_e;
 wire fx68k_e_pos, fx68k_e_neg;
 
-reg e_pos_toggle = 1'b0;
-reg e_neg_toggle = 1'b0;
-always @(posedge clk_cpu or negedge _cpuReset) begin
-    if (!_cpuReset) begin
-        e_pos_toggle <= 1'b0;
-        e_neg_toggle <= 1'b0;
-    end else begin
-        if (fx68k_e_pos) e_pos_toggle <= ~e_pos_toggle;
-        if (fx68k_e_neg) e_neg_toggle <= ~e_neg_toggle;
-    end
-end
-
-reg [2:0] e_pos_sync = 3'b000;
-reg [2:0] e_neg_sync = 3'b000;
+reg [2:0] fx68k_e_sync = 3'b000;
 always @(posedge clk_sys or negedge _cpuReset) begin
-    if (!_cpuReset) begin
-        e_pos_sync <= 3'b000;
-        e_neg_sync <= 3'b000;
-    end else begin
-        e_pos_sync <= {e_pos_sync[1:0], e_pos_toggle};
-        e_neg_sync <= {e_neg_sync[1:0], e_neg_toggle};
-    end
+    if (!_cpuReset)
+        fx68k_e_sync <= 3'b000;
+    else
+        fx68k_e_sync <= {fx68k_e_sync[1:0], fx68k_e};
 end
 
-wire turbo_e_rising  = (e_neg_sync[2] ^ e_neg_sync[1]);
-wire turbo_e_falling = (e_pos_sync[2] ^ e_pos_sync[1]);
-
-wire via_e_rising  = cpu_turbo_active ? turbo_e_rising  : fx68k_e_neg;
-wire via_e_falling = cpu_turbo_active ? turbo_e_falling : fx68k_e_pos;
+// In Macintosh Plus hardware, VIA 6522 PHI2 clock is inverted 68000 E clock (~E):
+// When fx68k.E falls (1 -> 0, 2'b10), VIA PHI2 rises (via_e_rising).
+// When fx68k.E rises (0 -> 1, 2'b01), VIA PHI2 falls (via_e_falling).
+wire via_e_rising  = (fx68k_e_sync[2:1] == 2'b10);
+wire via_e_falling = (fx68k_e_sync[2:1] == 2'b01);
 
 // -------------------------------------------------------------------------
 // Fixed 783.36 kHz VIA Timer Tick Generator
@@ -416,27 +406,15 @@ wire ram_mirror_alias =
     (cpuAddr[23] == 1'b1)                 // $800000-$BFFFFF (A23 mirror side)
  || (cpuAddr[23:5] == 19'h7FFFF)          // $FFFFE0-$FFFFFF (vector mirror side)
  || (cpuAddr[19:1] == 19'b0);             // $000000-$00001E (low vector words)
-wire        cache_cacheable = (configCache || hw_cache_en) && (selectROM || selectRAM) &&
+wire       cache_en_cfg    = hw_turbo_ovr ? hw_cache_en : configCache;
+wire        cache_cacheable = cache_en_cfg && (selectROM || selectRAM) &&
                               !memoryOverlayOn && !cache_in_sweep && !ram_mirror_alias;
 
-// Effective video/audio DMA loads after Option-A arbitration (CPU wins)
-// and the hw_video_off test switch. The shifter/audio in dataController
-// must use these: on a collision tick ramDataIn/sdram_do carries the
-// CPU's word, not a video pixel word.
-wire loadPixels_eff = loadPixels && !cpu_mem_acc && !hw_video_off;
-wire loadSound_eff  = loadSound  && !cpu_mem_acc && !hw_video_off;
-
-// CPU RAM write invalidate -> invalidate the line just written.
-// Phase-2 gated pulse (the form proven on the board at 631431f): at
-// busPhase==2, _cpuAS is already asserted so cpuAddr holds the write
-// address (stable through the whole request). The 996f7f8 "delayed"
-// variant (posedge after sdram_we&&ram_req) proved wrong on the board
-// (RAM test failure 0200F8): on a 63.8ns grid cycle a 204ns write request
-// straddles grid edges and the next posedge's cpuAddr can belong to an
-// already-terminated cycle. Known gap: this is phase-aligned, so in
-// turbo (~half the write requests don't overlap phase 2) it misses
-// invalidations - to be reworked once stock is green.
-wire        cache_wr_evt   = !_cpuRW && selectRAM && !_cpuAS && (busPhase == 3'd2);
+// CPU RAM write invalidate -> invalidate the line being written.
+// Active throughout any CPU RAM write (!_cpuRW && selectRAM && !_cpuAS) while
+// cpuAddr is guaranteed stable by 68000 bus protocol, so both Stock and Turbo
+// writes always invalidate the matching cache index on the first clk_sys edge.
+wire        cache_wr_evt   = !_cpuRW && selectRAM && !_cpuAS;
 wire        cache_wr_pulse = cache_wr_evt;
 
 wire        cache_hit;
@@ -451,12 +429,12 @@ assign      cpu_data_in_dbg = dataControllerDataOut; // iEdb: what the 68k latch
 reg [10:0] cache_inv_cnt = 11'd0;
 reg        reset_hi_d = 1'b0;
 reg        cache_en_d = 1'b0;
-wire       cache_en_cfg = configCache || hw_cache_en;
 always @(posedge clk_sys) begin
     reset_hi_d <= _cpuReset;
     cache_en_d <= cache_en_cfg;
 end
-wire cache_inv_start = _cpuReset && ((_cpuReset && !reset_hi_d) || (cache_en_cfg && !cache_en_d));
+wire cache_inv_start = _cpuReset && ((_cpuReset && !reset_hi_d) || (cache_en_cfg && !cache_en_d) ||
+                                     (ice_poke_valid && (ice_poke_idx == 3'd7)));
 always @(posedge clk_sys or negedge _cpuReset) begin
     if (!_cpuReset)
         cache_inv_cnt <= 11'd0;
@@ -469,16 +447,34 @@ always @(posedge clk_sys or negedge _cpuReset) begin
 end
 wire cache_invalidate_all = (cache_inv_cnt != 11'd0); // high for cnt=1..1024 (1024 lines)
 
+reg        cache_fill_pulse;
+reg [15:0] cache_fill_data;
+reg [23:1] fill_addr;
+reg        fill_is_rom;
+
+// Canonical physical CPU word address for cache lookup, write-invalidation, and fill:
+// Resolves RAM bank wrapping (128K/512K/1MB) and the $FFFFE0-$FFFFFF vector mirror
+// identically to addrController.v so aliased RAM accesses share the same cache tag/index
+// and match sdram_rd_addr.
+wire [20:0] cpu_ram_word = (cpuAddr[23:5] == 19'h7FFFF) ? {17'b0, cpuAddr[4:1]} : cpuAddr[21:1];
+wire [20:0] cpu_phys_ram_addr = {
+    (configRAMSize != 2'b11)   ? 2'b00 : cpu_ram_word[20:19],
+    (configRAMSize[1] == 1'b0) ? 1'b0  : cpu_ram_word[18],
+    (configRAMSize == 2'b00)   ? 2'b00 : cpu_ram_word[17:16],
+    cpu_ram_word[15:0]
+};
+wire [23:1] cpu_cache_addr = selectROM ? {5'b10000, romAddr} : {2'b00, cpu_phys_ram_addr};
+
 bram_cache cache0 (
     .clk_sys      ( clk_sys           ),
     .reset_n      ( _cpuReset         ),
     .invalidate_all ( cache_invalidate_all ),
-    .cpu_addr     ( cpuAddr           ),
-    .cacheable    ( cache_cacheable   ),
+    .cpu_addr     ( cpu_cache_addr    ),
+    .cacheable    ( cache_cacheable && !_cpuAS && _cpuRW ),
     .rom_req      ( rom_req           ),
     .ram_req      ( ram_req           ),
     .cpu_wr_pulse ( cache_wr_pulse    ),
-    .cpu_wr_addr  ( cpuAddr           ),
+    .cpu_wr_addr  ( cpu_cache_addr    ),
     .fill_pulse   ( cache_fill_pulse  ),
     .fill_addr    ( fill_addr         ),
     .fill_data    ( cache_fill_data   ),
@@ -487,17 +483,19 @@ bram_cache cache0 (
 );
 
 // DTACK completion conditions:
-// Cache hit (Phase 3): asserts one cycle earlier than normal in both modes.
+// Cache hit: asserts immediately from BRAM (1 clk_sys tick after cpuAddr)
+// without waiting for busPhase==2 (ram_req/rom_req) or cpu_slot!
 // Stock Mode (7.83 MHz): DTACK at Phase 4 on miss (unchanged).
 // Turbo Mode (19.58 MHz): DTACK at Phase 7 on miss (unchanged).
 // All other non-VIA accesses (and non-IACK) wait for io_done.
-wire ram_done = cache_hit || (cpu_turbo_active ? (busPhase >= 3'd7) : (busPhase >= 3'd4));
-wire rom_done = cache_hit || (cpu_turbo_active ? (busPhase >= 3'd7) : (busPhase >= 3'd4));
+wire ram_done = (cpu_turbo_active ? (busPhase >= 3'd7) : (busPhase >= 3'd4));
+wire rom_done = (cpu_turbo_active ? (busPhase >= 3'd7) : (busPhase >= 3'd4));
 wire io_done  = cpu_turbo_active ? io_synced : 1'b1;
 
 // _cpuDTACK_int is the computed signal; also used by fill_pulse to detect
 // the exact cycle when miss data becomes valid (DTACK falling edge).
-wire _cpuDTACK_int = ~((!_cpuAS && ram_req && ram_done) ||
+wire _cpuDTACK_int = ~((!_cpuAS && cache_hit) ||
+                       (!_cpuAS && ram_req && ram_done) ||
                        (!_cpuAS && rom_req && rom_done) ||
                        (!_cpuAS && (cpuFC != 3'b111) && !selectVIA && !selectRAM && !selectROM && io_done));
 assign _cpuDTACK = _cpuDTACK_int;
@@ -521,50 +519,45 @@ assign _cpuDTACK = _cpuDTACK_int;
 // ---------------------------------------------------------------------------
 wire cacheable_rd = cache_cacheable && !_cpuAS && _cpuRW && (ram_req || rom_req);
 
-// Miss tracking: valid from the first grid cycle of a cacheable read until
-// the next cycle starts (/AS re-assert) or a write to the same word lands
-// (write-through invalidation supersedes the pending fill).
+// Miss tracking: valid from the first grid cycle of a cacheable read miss
+// until the fill completes or the bus cycle ends (_cpuAS rises).
 reg        miss_pending;
+reg        miss_filled;
 reg [23:1] miss_addr;
-always @(posedge clk_sys or negedge _cpuReset or posedge _cpuAS) begin
-    if (!_cpuReset)
+always @(posedge clk_sys or posedge req_rst) begin
+    if (req_rst) begin
         miss_pending <= 1'b0;
-    else if (_cpuAS)                 // new cycle starts: previous is over
+        miss_filled  <= 1'b0;
+    end else if (ram_fill_evt || rom_fill_evt) begin
         miss_pending <= 1'b0;
-    else if (cacheable_rd && !cache_hit &&
-             !(cache_wr_evt && (miss_addr == cpuAddr)))
+        miss_filled  <= 1'b1;
+    end else if (!miss_filled && cacheable_rd && !cache_hit) begin
         miss_pending <= 1'b1;
+    end
 end
 always @(posedge clk_sys or negedge _cpuReset) begin
     if (!_cpuReset)
         miss_addr <= 23'b0;
     else if (cacheable_rd && !cache_hit)
-        miss_addr <= cpuAddr;
+        miss_addr <= cpu_cache_addr;
 end
 
 // --- RAM fill: sdram_rd_done is the SDRAM FSM's read-data-valid pulse (clk_sys
-// domain). The FSM read the word identified by sdram_rd_addr (21-bit CPU
-// word address = cpuAddr[21:1], de-mapped at the instantiation); fill that
-// line if it matches the in-flight miss (1-word lines: line == word address).
-wire ram_fill_evt = sdram_rd_done && miss_pending &&
+// domain, busPhase==6). Require ram_req && miss_pending and address match.
+wire ram_fill_evt = sdram_rd_done && ram_req && miss_pending && !miss_filled &&
                     (sdram_rd_addr == miss_addr[21:1]);
 
-// --- ROM fill: rising edge of the ROM miss-DTACK condition. At that edge
-// the 68k latches romDataMod and /AS is still low (cpuAddr stable).
-wire rom_miss_dtack = cacheable_rd && rom_req && rom_done && !cache_hit;
-reg        rom_md_prev = 1'b0;
-always @(posedge clk_sys or negedge _cpuReset) begin
-    if (!_cpuReset)
-        rom_md_prev <= 1'b0;
-    else
-        rom_md_prev <= rom_miss_dtack;
-end
-wire rom_fill_evt = rom_miss_dtack && !rom_md_prev;
+// --- ROM fill: flash_dspi.v runs on clk_pixel_x5 (5x clk_sys) and takes 24
+// x5 clocks (~5 busPhase periods) from cs to shift in all 16 bits of romData:
+//   * Stock mode (cs at busPhase==1): romData valid at busPhase==6 (when fx68k
+//     is in S6 and latches iEdb at posedge 6->7).
+//   * Turbo mode (cs at busPhase==2): romData valid at busPhase==7 (when
+//     rom_done asserts DTACK and fx68k latches iEdb).
+// Sampling at busPhase==4 in Stock mode latched half-shifted garbage from SPI flash!
+wire rom_data_ready = cpu_turbo_active ? (busPhase == 3'd7) : (busPhase == 3'd6);
+wire rom_fill_evt   = cacheable_rd && rom_req && !cache_hit &&
+                      miss_pending && !miss_filled && rom_data_ready;
 
-reg        cache_fill_pulse;
-reg [15:0] cache_fill_data;
-reg [23:1] fill_addr;
-reg        fill_is_rom;
 always @(posedge clk_sys) begin
     if (ram_fill_evt) begin
         cache_fill_pulse <= 1'b1;
@@ -574,7 +567,7 @@ always @(posedge clk_sys) begin
     end else if (rom_fill_evt) begin
         cache_fill_pulse <= 1'b1;
         cache_fill_data  <= romDataMod;    // word the CPU latches
-        fill_addr        <= cpuAddr;
+        fill_addr        <= cpu_cache_addr;
         fill_is_rom      <= 1'b1;
     end else begin
         cache_fill_pulse <= 1'b0;
@@ -595,7 +588,7 @@ assign last_fill_is_rom = last_fill_is_rom_r;
 
 // Hit / miss counters: 0->1 edges of the level conditions (one count per
 // cycle, since both conditions are low outside a cycle).
-wire cyc_hit_cnd  = cacheable_rd &&  cache_hit;
+wire cyc_hit_cnd  = cache_cacheable && !_cpuAS && _cpuRW && cache_hit;
 wire cyc_miss_cnd = cacheable_rd && !cache_hit;
 reg  hit_prev = 1'b0, miss_prev = 1'b0;
 always @(posedge clk_sys or negedge _cpuReset) begin
@@ -618,12 +611,11 @@ reg [15:0] cache_fills_r  = 16'd0;
 assign cache_hits   = cache_hits_r;
 assign cache_misses = cache_misses_r;
 assign cache_fills  = cache_fills_r;
-// cpuAddr is [23:1] (A0 not present): $F80010 => A5=1, A4/A3/A2/A1=0
-// $F80010 (hits slot, reg-index 4): A4=1, A3=0, A2=0.
-// cpuAddr[23:1] has cpuAddr[3]=A4, cpuAddr[2]=A3, cpuAddr[1]=A2 (no A1/A0).
-wire cache_clr = selectHardwareRegs && !_cpuAS && !_cpuRW && !_cpuLDS &&
-                 (cpuAddr[3]) && (cpuAddr[2:1] == 2'b00) &&
-                 (cpuDataOut[15:8] == 8'h55) ||
+// cpuAddr is [23:1] (A0 not present):
+// $F80010 (hits slot, reg-index 4): cpuAddr[4]=A4=1, cpuAddr[3]=A3=0, cpuAddr[2]=A2=0.
+wire cache_clr = (selectHardwareRegs && !_cpuAS && !_cpuRW && !_cpuLDS &&
+                  (cpuAddr[4]) && (cpuAddr[3:2] == 2'b00) &&
+                  (cpuDataOut[15:8] == 8'h55)) ||
                  (ice_poke_valid && (ice_poke_idx == 3'd4) && (ice_poke_data[15:8] == 8'h55));
 always @(posedge clk_sys or negedge _cpuReset) begin
     if (!_cpuReset || cache_clr) begin
@@ -655,7 +647,7 @@ fx68k fx68k (
 	.ASn        ( _cpuAS ),
 	.LDSn       ( _cpuLDS ),
 	.UDSn       ( _cpuUDS ),
-	.E          ( ),
+	.E          ( fx68k_e ),
 	.E_div      ( 1'b0 ),
 	.E_PosClkEn ( fx68k_e_pos ),
 	.E_NegClkEn ( fx68k_e_neg ),
@@ -769,6 +761,7 @@ dataController #(SCSI_DEVS) dc0
 	.selectSEOverlay(selectSEOverlay),
 	.selectHardwareRegs(selectHardwareRegs),
 	.cpu_turbo_active(cpu_turbo_active),
+	.cache_en_cfg(cache_en_cfg),
 	.hw_turbo_en(hw_turbo_en),
 	.hw_turbo_ovr(hw_turbo_ovr),
 	.hw_cache_en(hw_cache_en),
@@ -790,8 +783,9 @@ dataController #(SCSI_DEVS) dc0
 	.cycleReady(busPhase == 3'd7),
 	.memoryDataOut(sdram_din),
         .romSel(!_romOE), 
-	.ramDataIn( (cache_hit && ram_req) ? cache_data : sdram_do   ),
-	.romDataIn( (cache_hit && rom_req) ? cache_data : romDataMod ),
+	.ramDataIn( cache_hit ? cache_data : sdram_do   ),
+	.dmaDataIn( sdram_do                            ),
+	.romDataIn( cache_hit ? cache_data : romDataMod ),
 
         // interface to sd card
 	.sdc_img_mounted( sdc_image_mounted ),

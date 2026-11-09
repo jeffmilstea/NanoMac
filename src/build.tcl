@@ -73,17 +73,6 @@ set_option -use_mspi_as_gpio 1
 set_option -use_sspi_as_gpio 1
 set_option -loading_rate 25.000
 
-# Inject git short hash (first 4 hex digits = 16 bits) as a synthesis-time define.
-# This value appears in the $F80006 CSR so you can verify which build is running.
-catch {
-    set git_short [exec git rev-parse --short=4 HEAD]
-    set_option -verilog_define "GIT_HASH=16'h${git_short}"
-    puts "Build hash: 0x${git_short}"
-} err
-if {$err ne ""} {
-    set_option -verilog_define "GIT_HASH=16'hDEAD"
-    puts "Warning: could not get git hash ($err), using 0xDEAD"
-}
-
+# Git short hash is handled via default `define in dataController.sv
 run syn
 run pnr

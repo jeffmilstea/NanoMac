@@ -510,6 +510,7 @@ reg shift_clock;
 reg shift_tick_r;
 reg shift_tick_f;
 reg shift_timer_tick;
+reg shift_done;
 reg cb2_c2 = 1'b0;
 reg [7:0] bit_cnt;  // TODO: check bit order
 
@@ -525,7 +526,10 @@ wire shift_pulse =
 always @(posedge clock) begin
    cb2_c2  <= cb2_i;
 
-   if(rising) begin
+   if(wen && addr == 4'hB && data_in[4:2] == 3'b000) begin
+      shift_clock   <= 1'b1;
+      shift_clock_d <= 1'b1;
+   end else if(rising) begin
       if(!shift_active) begin
          if(acr[4:2] == 3'b000)
            shift_clock <= cb1_i;
@@ -570,27 +574,37 @@ always @(posedge clock) begin
    end
 end
 
-// tell people that we're ready!
-assign irq_events[2] = shift_tick_r && !shift_active && rising && serport_en;
+// Only fire SR interrupt when an 8-bit shift actually completes (never spuriously while idle)
+assign irq_events[2] = shift_done && !shift_active && rising && serport_en;
 
 always @(posedge clock) begin
-   if(!shift_active && acr[4:2] != 3'b000 && trigger_serial) begin
+   if(wen && addr == 4'hB && data_in[4:2] == 3'b000) begin
+      shift_active <= 1'b0;
+      shift_done   <= 1'b0;
+   end else if(acr[4:2] != 3'b000 && trigger_serial) begin
       bit_cnt      <= 8'd7;
       shift_active <= 1'b1;
-   end else if(falling) begin
-      if(shift_active) begin
-         if(acr[3:2] == 2'b00)
-           shift_active <= acr[4]; // when 1'b1 we're active, but for mode 000 we go inactive.
-         else if(shift_pulse && shift_clock) begin
-            if(bit_cnt == 8'd0)
-              shift_active <= 1'b0;
-            else
-              bit_cnt <= bit_cnt - 8'd1;
+      shift_done   <= 1'b0;
+   end else begin
+      if(rising && shift_done)
+         shift_done <= 1'b0;
+      if(falling && shift_active) begin
+         if(acr[3:2] == 2'b00) begin
+            shift_active <= acr[4]; // when 1'b1 we're active, but for mode 000 we go inactive.
+            shift_done   <= 1'b0;
+         end else if(shift_pulse && shift_clock) begin
+            if(bit_cnt == 8'd0) begin
+               shift_active <= 1'b0;
+               shift_done   <= 1'b1;
+            end else begin
+               bit_cnt <= bit_cnt - 8'd1;
+            end
          end
-      end                            
+      end
    end
    if(reset) begin
       shift_active <= 1'b0;
+      shift_done   <= 1'b0;
       bit_cnt      <= 8'd0;
    end
 end

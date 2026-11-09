@@ -37,6 +37,7 @@ module dataController (
 	input		       selectSEOverlay,
 	input		       selectHardwareRegs,
 	input		       cpu_turbo_active,
+	input		       cache_en_cfg,
 	output reg	       hw_turbo_en,
 	output reg	       hw_turbo_ovr,
 	output reg	       hw_cache_en,
@@ -64,6 +65,7 @@ module dataController (
 	input		       cycleReady, 
 	input		       romSel,
 	input [15:0]	       ramDataIn,
+	input [15:0]	       dmaDataIn,
 	input [15:0]	       romDataIn,
 	output [15:0]	       memoryDataOut,
 	
@@ -189,7 +191,7 @@ module dataController (
 	always @(posedge clk) begin
 		if(cycleReady && loadSound) begin
 		        if(snd_ena) audio_latch <= 8'h7f; // when disabled, drive output high
-			else  	    audio_latch <= ramDataIn[15:8] - 8'd128;
+			else  	    audio_latch <= dmaDataIn[15:8] - 8'd128;
 
 			audioFilterLatch[0] <= audioVol;
 			audioFilterLatch[1] <= audioFilterLatch[0];		   
@@ -245,25 +247,34 @@ module dataController (
 	//                [3] hw_video_off (R/W) — drop video/audio SDRAM fetches
 	//                [8] cpu_turbo_active (RO)
 	//                [11] hw_video_off (RO mirror)
-	// $F8000C (RO): Git commit short hash — injected at synthesis time via GIT_HASH define
+	// $F8000C (RO): 16-bit hardware benchmark timer (1.9584 MHz = 510.64 ns/tick, saturating;
+	//               cleared alongside cache counters by writing 0x55xx to $F80010 or ICE 'C')
 	// $F80010 (RO): [15:0] cache_hits   (cleared by writing 0x55xx to this slot)
 	// $F80014 (RO): [15:0] cache_misses
 	// $F80018 (RO): [15:0] cache_fills
 	// $F8001C (RO): Last miss-fill snapshot: {last_fill_is_rom, 1'b0, last_fill_addr[13:1], 1'b0}
-	`ifndef GIT_HASH
-	`define GIT_HASH 16'hDEAD
-	`endif
-	// HW register index: A4 (bit2 of cpuAddrRegMid) : A3 : A2 (bit1 of cpuAddrRegLo)
-	// (8 word slots; A0 must be 0 for word access. The previous {A4,A2,A1} decode
-	// dropped A3, which aliased $F80008/$F8000C onto the wrong slots.)
-	wire [2:0] hwRegIdx = { cpuAddrRegMid[2], cpuAddrRegA3, cpuAddrRegLo[1] };
+	// HW register index: A4 (bit0 of cpuAddrRegMid[6:4]) : A3 : A2 (bit1 of cpuAddrRegLo[2:1])
+	// (8 word slots; A0 must be 0 for word access.)
+	wire [2:0] hwRegIdx = { cpuAddrRegMid[0], cpuAddrRegA3, cpuAddrRegLo[1] };
+
+	reg [15:0] hw_bench_timer = 16'd0;
+	wire bench_timer_clr = (selectHardwareRegs && !_cpuAS && !_cpuRW && !_cpuLDS &&
+	                        (hwRegIdx == 3'd4) && (cpuDataIn[15:8] == 8'h55)) ||
+	                       (ice_poke_valid && (ice_poke_idx == 3'd4) && (ice_poke_data[15:8] == 8'h55));
+	always @(posedge clk or negedge _cpuReset) begin
+		if (!_cpuReset || bench_timer_clr)
+			hw_bench_timer <= 16'd0;
+		else if (clk8_en_p && (hw_bench_timer != 16'hFFFF))
+			hw_bench_timer <= hw_bench_timer + 16'd1;
+	end
+
 	wire [15:0] hwRegsDataOut =
 	    (hwRegIdx == 3'd0) ? 16'h4E4D :
 	    (hwRegIdx == 3'd1) ? 16'h0001 :
 	    // W: bit0=turbo_en bit1=turbo_ovr bit2=cache_en bit3=video_off bit[5:4]=fillph
-	    // RO: bit8=turbo_active bit10=cache_en bit11=video_off
-	    (hwRegIdx == 3'd2) ? { 4'd0, hw_video_off, hw_cache_en, 1'b0, cpu_turbo_active, 2'b00, hw_fillph_turbo, 1'b0, hw_cache_en, hw_turbo_ovr, hw_turbo_en } :
-	    (hwRegIdx == 3'd3) ? `GIT_HASH :
+	    // RO: bit8=turbo_active bit10=cache_en_cfg bit11=video_off
+	    (hwRegIdx == 3'd2) ? { 4'd0, hw_video_off, cache_en_cfg, 1'b0, cpu_turbo_active, 2'b00, hw_fillph_turbo, 1'b0, hw_cache_en, hw_turbo_ovr, hw_turbo_en } :
+	    (hwRegIdx == 3'd3) ? hw_bench_timer :
 	    (hwRegIdx == 3'd4) ? cache_hits   :
 	    (hwRegIdx == 3'd5) ? cache_misses :
 	    (hwRegIdx == 3'd6) ? cache_fills  :
@@ -276,8 +287,8 @@ module dataController (
 	wire [15:0] ice_peek_sel =
 	    (ice_peek_idx == 3'd0) ? 16'h4E4D :
 	    (ice_peek_idx == 3'd1) ? 16'h0001 :
-	    (ice_peek_idx == 3'd2) ? { 4'd0, hw_video_off, hw_cache_en, 1'b0, cpu_turbo_active, 2'b00, hw_fillph_turbo, 1'b0, hw_cache_en, hw_turbo_ovr, hw_turbo_en } :
-	    (ice_peek_idx == 3'd3) ? `GIT_HASH :
+	    (ice_peek_idx == 3'd2) ? { 4'd0, hw_video_off, cache_en_cfg, 1'b0, cpu_turbo_active, 2'b00, hw_fillph_turbo, 1'b0, hw_cache_en, hw_turbo_ovr, hw_turbo_en } :
+	    (ice_peek_idx == 3'd3) ? hw_bench_timer :
 	    (ice_peek_idx == 3'd4) ? cache_hits   :
 	    (ice_peek_idx == 3'd5) ? cache_misses :
 	    (ice_peek_idx == 3'd6) ? cache_fills  :
@@ -517,6 +528,7 @@ module dataController (
 			kbd_bitcnt <= 0;
 			kbd_transmitting <= 0;
 			kbd_wait_receiving <= 0;
+			kbd_receiving <= 0;
 			kbd_data_valid <= 0;
 			ADBListenD <= 0;
 		end else if (clk8_en_p) begin
@@ -645,7 +657,7 @@ module dataController (
 		.clk(clk), 
 		.clk8_en_p(clk8_en_p), 
 		.clk8_en_n(clk8_en_n), 
-		.dataIn(ramDataIn),
+		.dataIn(dmaDataIn),
 		.loadPixels(loadPixels & cycleReady), 
 		.pixelOut(pixelOut));
 	

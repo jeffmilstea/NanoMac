@@ -84,8 +84,8 @@ wire		    ram_ready;
 wire [15:0]	    sdram_dout;
 wire		    sdram_rd_done;
 wire [21:0]	    sdram_rd_addr_m; // SDRAM FSM mapped read address (22-bit)
-// tb uses identity addr mapping ({1'b0,ram_addr}), so CPU word addr = rd_addr[21:1]
-wire [20:0]	    sdram_rd_addr = sdram_rd_addr_m[21:1];
+// tb uses identity addr mapping ({1'b0,ram_addr}), so CPU word addr = rd_addr[20:0]
+wire [20:0]	    sdram_rd_addr = sdram_rd_addr_m[20:0];
 wire		    enPhi1_raw, enPhi2_raw;
    
 sdram sdram (
@@ -243,6 +243,7 @@ macplus macplus (
 	       .enPhi1_gated(enPhi1_raw),
 	       .enPhi2_gated(enPhi2_raw),
 	       .cpu_reset_override(1'b0),
+	       .ice_mem_busy(1'b0),
 	       .ice_poke_valid(1'b0),
 	       .ice_poke_idx(3'd0),
 	       .ice_poke_data(16'd0),

@@ -77,25 +77,48 @@ module bram_cache (
     // -----------------------------------------------------------------------
     // Read port: address registered each cycle; output valid 1 cycle later
     // -----------------------------------------------------------------------
-    reg [15:0]       data_out_r;
-    reg [TAG_BITS:0] tag_out_r;
+    reg [15:0]          data_out_r;
+    reg [TAG_BITS:0]    tag_out_r;
+    reg [IDX_BITS-1:0]  rd_idx_r;
+    reg                 rd_valid_r;
 
-    wire [IDX_BITS-1:0] rd_idx = cpu_addr[IDX_BITS:1]; // cpu_addr[10:1]
+    wire [IDX_BITS-1:0] rd_idx   = cpu_addr[IDX_BITS:1];    // cpu_addr[10:1]
+    wire [IDX_BITS-1:0] fill_idx = fill_addr[IDX_BITS:1];   // fill_addr[10:1]
+    wire [IDX_BITS-1:0] inv_idx  = cpu_wr_addr[IDX_BITS:1]; // cpu_wr_addr[10:1]
+    wire [TAG_BITS-1:0] fill_tag = fill_addr[23:11];
 
     always @(posedge clk_sys) begin
         data_out_r <= data_ram[rd_idx];
         tag_out_r  <= tag_ram[rd_idx];
     end
 
+    // Track which index is currently latched in data_out_r/tag_out_r and suppress
+    // hits on the cycle immediately following a same-index write/invalidation/fill
+    // (Gowin SDPB read-during-write outputs old data).
+    always @(posedge clk_sys or negedge reset_n) begin
+        if (!reset_n) begin
+            rd_idx_r   <= {IDX_BITS{1'b0}};
+            rd_valid_r <= 1'b0;
+        end else begin
+            rd_idx_r <= rd_idx;
+            if (invalidate_all ||
+                (cpu_wr_pulse && (inv_idx == rd_idx)) ||
+                (fill_pulse   && (fill_idx == rd_idx)))
+                rd_valid_r <= 1'b0;
+            else
+                rd_valid_r <= 1'b1;
+        end
+    end
+
     // -----------------------------------------------------------------------
-    // Hit detection (combinatorial from registered BRAM output)
-    // Valid at Phase 3 when BRAM was indexed at Phase 2 (or earlier)
+    // Hit detection (combinatorial from registered BRAM output + index match)
     // -----------------------------------------------------------------------
     wire [TAG_BITS-1:0] cur_tag      = cpu_addr[23:11];
     wire                stored_valid = tag_out_r[TAG_BITS];
     wire [TAG_BITS-1:0] stored_tag   = tag_out_r[TAG_BITS-1:0];
 
-    assign cache_hit  = cacheable && stored_valid && (stored_tag == cur_tag);
+    assign cache_hit  = cacheable && rd_valid_r && (rd_idx_r == rd_idx) &&
+                        stored_valid && (stored_tag == cur_tag);
     assign cache_data = data_out_r;
 
     // -----------------------------------------------------------------------
@@ -109,13 +132,7 @@ module bram_cache (
     //   This correctly marks the line as invalid without touching data_ram.
     //   The data_ram entry is stale but harmless — it won't be served because
     //   valid=0 means cache_hit will always be 0 for that index until refilled.
-    //
-    // fill_pulse and cpu_wr_pulse never coincide: fills happen at Phase 4/7
-    // of a read cycle; wr_pulse fires at Phase 2 of a write cycle.
     // -----------------------------------------------------------------------
-    wire [IDX_BITS-1:0] fill_idx = fill_addr[IDX_BITS:1];   // fill_addr[10:1]
-    wire [IDX_BITS-1:0] inv_idx  = cpu_wr_addr[IDX_BITS:1]; // cpu_wr_addr[10:1]
-    wire [TAG_BITS-1:0] fill_tag = fill_addr[23:11];
 
     // Power-on / enable-rise invalidation sweep: SRAM starts with
     // uninitialized contents on the FPGA, so a garbage valid+tag could

@@ -112,9 +112,20 @@ module tb_ramwin;
     .vid_alt(1'b0),
     .snd_alt(1'b0),
     .loadSound(loadSound),
+    .video_dma_off(1'b0),
     .memoryOverlayOn(1'b0),
     .refresh(refresh)
   );
+
+  // Mirror macplus.sv's Clean TDM cpu_slot + ram_req handshake
+  wire cpu_slot = cpuBusControl || (!loadPixels && !loadSound && !refresh);
+  reg  ram_req = 1'b0;
+  always @(posedge clk or posedge reset or posedge _cpuAS) begin
+    if (reset || _cpuAS)
+      ram_req <= 1'b0;
+    else if (phase == 3'd2 && selectRAM && cpu_slot)
+      ram_req <= 1'b1;
+  end
 
   // raw (pre-arbitration) DMA demands, to classify each phase-2 tick
   wire raw_loadPixels = ac.vt.loadPixels;
@@ -237,20 +248,24 @@ module tb_ramwin;
         end
       end
 
-      // ---- classify the phase-2 tick ending NOW (FSM decides here too) ----
+      // ---- classify the phase-2 tick ending NOW (Clean TDM priority) ----
       if (ready && (phase == 3'd2)) begin
         ph2_total = ph2_total + 1;
         if (fsm_busy) ph2_busy = ph2_busy + 1; else ph2_free = ph2_free + 1;
+
+        // Verify Clean TDM invariant: if video/audio/refresh owns this slot,
+        // cpu_slot must be 0 so a colliding CPU access waits (ram_req stays 0)
+        // instead of latching DMA data!
+        if ((raw_loadPixels || raw_loadSound || refresh) && cpu_slot) begin
+          fails = fails + 1;
+          $display("*** TDM VIOLATION @tick %0d: cpu_slot=1 during DMA/refresh!", ticks);
+        end
+
         if (_ramOE == 1'b0 || _ramWE == 1'b0) begin // a fetch is issued
           fsm_busy = 1'b1;
           ph2_issued = ph2_issued + 1;
           chk_pending = 1'b1;
-          if (selectRAM && !_cpuAS) begin
-            // CPU RAM access is address-valid: it must own the slot
-            chk_expect = cpuAddr[21:1];
-            chk_owner  = 2'd0;
-            cpu_fetches = cpu_fetches + 1;
-          end else if (raw_loadPixels) begin
+          if (raw_loadPixels) begin
             chk_expect = videoAddr;
             chk_owner  = 2'd1;
             vid_fetches = vid_fetches + 1;
@@ -258,6 +273,10 @@ module tb_ramwin;
             chk_expect = audioAddr;
             chk_owner  = 2'd2;
             snd_fetches = snd_fetches + 1;
+          end else if (selectRAM && !_cpuAS && cpu_slot) begin
+            chk_expect = cpuAddr[21:1];
+            chk_owner  = 2'd0;
+            cpu_fetches = cpu_fetches + 1;
           end else begin
             chk_pending = 1'b0; // no recognizable owner - skip check
           end

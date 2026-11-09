@@ -25,6 +25,7 @@ double simulation_time;
 // (models the MCU re-sending the config value, i.e. extra 0->1 edges).
 double cache_late_ms = 0;
 int    cache_toggles = 0;
+double stop_ms       = 0;
 
 #define ROM "plusrom.bin"
 
@@ -343,12 +344,20 @@ static int      co_boot_reached = 0;
 static int      co_last_fill = 0;
 
 // Ground truth: what the DUT's memory input actually holds at byte addr a.
-//  ROM: tb model drives romData = SWAP16(rom[n]).
-//  RAM: tb model drives sdram_do = SWAP16(ram[a>>1]) (ptr[0]*256+ptr[1]).
-static uint16_t oracle_mem_word(uint32_t a) {
-  if(a >= 0x400000)
-    return SWAP16(rom[(a-0x400000)>>1]);
-  return SWAP16(ram[a>>1]);
+//  ROM: tb model drives romData = SWAP16(rom[n]), with fastboot NOP patches in macplus.sv.
+//  RAM: tb model drives sdram_do = SWAP16(ram[phys_word]) masked by ram_size.
+static uint16_t oracle_expected_word(uint32_t a, int sel_rom) {
+  if (sel_rom) {
+    uint32_t rw = tb->romAddr;
+    if (tb->fastboot && (rw == (0x0E90 >> 1) || rw == (0x0EA8 >> 1)))
+      return 0x4E71; // fastboot NOP patch in macplus.sv
+    return SWAP16(rom[rw]);
+  }
+  uint32_t w = ((a & 0xFFFFE0) == 0xFFFFE0) ? ((a & 0x1E) >> 1) : ((a >> 1) & 0x1FFFFF);
+  if (tb->ram_size != 3) w &= 0x07FFFF;
+  if ((tb->ram_size & 2) == 0) w &= 0x03FFFF;
+  if (tb->ram_size == 0) w &= 0x00FFFF;
+  return SWAP16(ram[w]);
 }
 
 void cache_oracle(double t) {
@@ -406,13 +415,15 @@ void cache_oracle(double t) {
   //  bus still held the PREVIOUS cycle's stale data -> thousands of false
   //  "CACHE FAULT" flags. The DTACK-deassert edge (first patch) overshoots
   //  into the next cycle -> hits=0.)
-  if(phase == 6 && !dtack && read && (ram_req || rom_req)) {
+  int sel_rom = (tb->mac_probes_dbg >> 20) & 1;
+  int sel_ram = (tb->mac_probes_dbg >> 19) & 1;
+  if(phase == 6 && !dtack && read && (ram_req || rom_req || tb->cache_hit_dbg)) {
     if(tb->cache_hit_dbg) {
       uint16_t delivered = tb->cpu_data_in_dbg;  // iEdb the CPU latches
       uint16_t cachedata = tb->cache_data_dbg;   // word the cache produced
       co_hits++;
       if(delivered != cachedata) diag_ph6_nohit++;
-      uint16_t exp = rom_req ? SWAP16(rom[tb->romAddr]) : SWAP16(ram[addr>>1]);
+      uint16_t exp = oracle_expected_word(addr, sel_rom);
       if(delivered != exp) {
         co_hits_bad++;
         co_last_bad_ms = (int)(t*1000*1000)/1000;
@@ -743,10 +754,12 @@ int main(int argc, char **argv) {
       if (tb->cache) tb->cache = 0; // raised by the experiment at cache_late_ms
     } else if (strcmp(argv[i], "--cache-toggles") == 0 && i + 1 < argc) {
       cache_toggles = atoi(argv[++i]);
+    } else if (strcmp(argv[i], "--stop-ms") == 0 && i + 1 < argc) {
+      stop_ms = atof(argv[++i]);
     }
   }
-  printf("NanoMac Simulation starting with Turbo=%d cache=%d fastboot=%d cache-late=%.0fms toggles=%d\n",
-         tb->turbo, tb->cache, tb->fastboot, cache_late_ms, cache_toggles);
+  printf("NanoMac Simulation starting with Turbo=%d cache=%d fastboot=%d cache-late=%.0fms toggles=%d stop=%.0fms\n",
+         tb->turbo, tb->cache, tb->fastboot, cache_late_ms, cache_toggles, stop_ms);
   
   /* run for a while */
   while(
@@ -756,7 +769,7 @@ int main(int argc, char **argv) {
 #ifdef VIDEO 
 	!sdl_cancelled &&
 #endif
-	1) {
+	(stop_ms <= 0 || (simulation_time * 1000.0) < stop_ms)) {
 #ifdef TRACEEND
     // do some progress outout
     int percentage = 100 * simulation_time / TRACEEND;

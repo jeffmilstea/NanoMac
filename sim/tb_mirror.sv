@@ -180,8 +180,8 @@ module tb_mirror;
             $display("*** FAIL case %0d @%06X: RAM + other select",
                      case_idx, {cpuAddr[23:1],1'b0});
         end
-        // ramAddr + strobe polarity (only when the DMA isn't on the mux)
-        if (selectRAM && !raw_lpx && !raw_lsnd) begin
+        // ramAddr + strobe polarity (only when DMA/refresh isn't on the mux)
+        if (selectRAM && !raw_lpx && !raw_lsnd && !(videoBusControl && refresh)) begin
           case_checks = case_checks + 1;
           if (ramAddr == case_word &&
               (case_rwl ? (_ramOE === 1'b0 && _ramWE === 1'b1)
@@ -276,7 +276,7 @@ module tb_mirror;
     // ---- A23 mirror: same word as the low address (RED on unfixed RTL) ----
     run_case(24'h8FF000, 1'b1, SEL_RAM, 21'h007F800);  // == $0FF000
     run_case(24'h8FF002, 1'b1, SEL_RAM, 21'h007F801);  // == $0FF002
-    run_case(24'hBFFFFE, 1'b1, SEL_RAM, 21'h01FFFFF);  // == $3FFFE (top word of RAM)
+    run_case(24'hAFFFFE, 1'b1, SEL_RAM, 21'h017FFFF);  // == $2FFFFE (A23 mirror)
     run_case(24'h8FF000, 1'b0, SEL_RAM, 21'h007F800);  // write (handler scratch)
     // ---- vector mirror $FFFFE0-$FFFFFF (RED on unfixed RTL) ----
     // vector n word = n>>1; vector 6 = A-line, vector 7 = illegal-instr
@@ -297,7 +297,8 @@ module tb_mirror;
     // ---- regression: other windows must be untouched ----
     run_case(24'hF80008, 1'b1, SEL_HW,  21'h0);
     run_case(24'h400040, 1'b1, SEL_ROM, 21'h0);
-    run_case(24'h9FFFFC, 1'b1, SEL_SCC, 21'h0);
+    run_case(24'h9FFFFC, 1'b1, SEL_SCC, 21'h0);        // SCC Read
+    run_case(24'hBFFFF8, 1'b0, SEL_SCC, 21'h0);        // SCC Write ($BFFFF9/$BFFFFB mouse IRQ enable!)
     run_case(24'hE80000, 1'b1, SEL_VIA, 21'h0);
 
     repeat (8) @(posedge clk);

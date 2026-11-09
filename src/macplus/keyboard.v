@@ -53,6 +53,7 @@ always@(posedge clk or posedge reset) begin
 	  8'h14: cmd_instant <= 1;
 	  8'h16: cmd_model   <= 1;
 	  8'h36: cmd_test    <= 1;
+	  default: cmd_inquiry <= 1; // never leave kbd_wait_receiving deadlocked on a glitched byte
 	endcase
      end
   end
@@ -125,12 +126,11 @@ end
 
 /* incoming data is valid on the changing edge of strobe */   
 reg caps = 1'b0;
+reg kbd_strobe_d = 1'b0;
 always @(posedge clk) begin
-   reg strobe;
-      
    if(en) begin
       got_key <= 1'b0;	 
-      if(kbd_strobe != strobe) begin
+      if(kbd_strobe != kbd_strobe_d) begin
 
 	 // caps lock needs some special treatment as the mac expects
 	 // a single up or down event per full key stroke. Basically as
@@ -149,7 +149,7 @@ always @(posedge clk) begin
 	 end
       end
       
-      strobe <= kbd_strobe;	 
+      kbd_strobe_d <= kbd_strobe;	 
    end
 end
    

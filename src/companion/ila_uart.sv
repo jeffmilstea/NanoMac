@@ -68,7 +68,24 @@ module ila_uart #(
     output reg [15:0]   ice_poke_data,
     output reg          ice_peek_req,
     output reg [2:0]    ice_peek_idx,
-    input  [15:0]       ice_peek_data
+    input  [15:0]       ice_peek_data,
+
+    // ICE SDRAM DMA read/write port (clk_pixel domain)
+    input  [2:0]        bus_phase,
+    input  [15:0]       sdram_dout,
+    output              ice_mem_busy,
+    output reg          ice_mem_active,
+    output reg          ice_mem_we,
+    output reg [20:0]   ice_mem_addr,
+    output reg [15:0]   ice_mem_wdata,
+
+    // ICE HID injection (mouse quadrature/button + keyboard scancode)
+    output reg          ice_mouse_strobe,
+    output reg [7:0]    ice_mouse_btn,
+    output reg [7:0]    ice_mouse_dx,
+    output reg [7:0]    ice_mouse_dy,
+    output reg          ice_kbd_strobe,
+    output reg [7:0]    ice_kbd_data
 );
 
     // -------------------------------------------------------------------------
@@ -252,6 +269,10 @@ module ila_uart #(
     localparam S_PEEK_PRINT = 4'd9;  // print one register line
     localparam S_PEEK_COLLECT = 4'd10; // collect 2 bytes for poke
     localparam S_CFG_COLLECT  = 4'd11; // collect 7 bytes for trigger config ('t')
+    localparam S_MEM_HDR      = 4'd12; // collect 5 bytes: addr[23:0], count[15:0]
+    localparam S_MEM_WR_DATA  = 4'd13; // collect 2 bytes per word for 'W'
+    localparam S_MEM_EXEC     = 4'd14; // execute 1 SDRAM word read/write slot
+    localparam S_MEM_RD_LO    = 4'd15; // push low byte of SDRAM read word to TX FIFO
 
     reg [3:0]  state;
     reg [7:0]  msg_idx;
@@ -271,11 +292,19 @@ module ila_uart #(
     reg [7:0]  poke_hi, poke_lo;
     reg [1:0]  poke_cnt;
 
+    // W/M ICE SDRAM DMA support
+    reg [2:0]  mem_hdr_idx;
+    reg [15:0] mem_word_cnt;
+    reg        mem_wr_hi_rx;
+    reg [7:0]  mem_lo_byte;
+    assign ice_mem_busy = (state == S_MEM_EXEC) || (state == S_MEM_RD_LO) || ice_mem_active;
+
     reg        print_after_step;
     reg [63:0] sample_latch;
     reg [19:0] step_timeout;
-    // Trigger config collection ('t' command): 7 bytes after the 't'
+    // Trigger/HID config collection ('t', 'm', 'k' commands)
     reg        cfg_collect;
+    reg [1:0]  cfg_cmd;
     reg [2:0]  cfg_idx;
 
     always @(posedge clk) begin
@@ -306,7 +335,22 @@ module ila_uart #(
             print_after_step    <= 0;
             step_timeout        <= 0;
             cfg_collect         <= 0;
+            cfg_cmd             <= 0;
             cfg_idx             <= 0;
+            ice_mem_active      <= 0;
+            ice_mem_we          <= 0;
+            ice_mem_addr        <= 0;
+            ice_mem_wdata       <= 0;
+            mem_hdr_idx         <= 0;
+            mem_word_cnt        <= 0;
+            mem_wr_hi_rx        <= 0;
+            mem_lo_byte         <= 0;
+            ice_mouse_strobe    <= 0;
+            ice_mouse_btn       <= 8'hFF;
+            ice_mouse_dx        <= 0;
+            ice_mouse_dy        <= 0;
+            ice_kbd_strobe      <= 0;
+            ice_kbd_data        <= 0;
         end else begin
             // Default strobes
             uart_halt_req       <= 0;
@@ -319,6 +363,8 @@ module ila_uart #(
             uart_force_trig_req <= 0;
             ice_poke_valid      <= 0;
             ice_peek_req        <= 0;
+            ice_mouse_strobe    <= 0;
+            ice_kbd_strobe      <= 0;
             fifo_wr             <= 0;
 
             case (state)
@@ -431,6 +477,19 @@ module ila_uart #(
                                         // mode, addr[23:16], addr[15:8], addr[7:0],
                                         // mask[23:16], mask[15:8], mask[7:0]
                                 cfg_collect <= 1'b1;
+                                cfg_cmd     <= 2'd0;
+                                cfg_idx     <= 3'd0;
+                                state       <= S_CFG_COLLECT;
+                            end
+                            8'h6D: begin // 'm' -> mouse inject: 3 bytes follow (btn, dx, dy)
+                                cfg_collect <= 1'b1;
+                                cfg_cmd     <= 2'd1;
+                                cfg_idx     <= 3'd0;
+                                state       <= S_CFG_COLLECT;
+                            end
+                            8'h6B: begin // 'k' -> keyboard inject: 1 byte follows (keycode)
+                                cfg_collect <= 1'b1;
+                                cfg_cmd     <= 2'd2;
                                 cfg_idx     <= 3'd0;
                                 state       <= S_CFG_COLLECT;
                             end
@@ -450,6 +509,16 @@ module ila_uart #(
                                 ice_peek_idx <= 3'd0;
                                 peek_settle  <= 2'd2;
                                 state        <= S_PEEK_SET;
+                            end
+                            8'h57: begin // 'W' -> ICE SDRAM Bulk Write: 3B byte_addr + 2B word_cnt + N*2B data
+                                ice_mem_we   <= 1'b1;
+                                mem_hdr_idx  <= 3'd0;
+                                state        <= S_MEM_HDR;
+                            end
+                            8'h4D: begin // 'M' -> ICE SDRAM Bulk Read: 3B byte_addr + 2B word_cnt -> N*2B data
+                                ice_mem_we   <= 1'b0;
+                                mem_hdr_idx  <= 3'd0;
+                                state        <= S_MEM_HDR;
                             end
                             default: ;
                         endcase
@@ -1019,25 +1088,46 @@ end
                 end
 
                 // -------------------------------------------------------------
-                // Collect 7 trigger-config bytes ('t' command)
+                // Collect payload bytes for 't' (7B), 'm' (3B), or 'k' (1B)
                 // -------------------------------------------------------------
                 S_CFG_COLLECT: begin
                     if (rx_valid) begin
-                        case (cfg_idx)
-                            3'd0: uart_trig_mode       <= rx_byte[2:0];
-                            3'd1: uart_trig_addr[23:16] <= rx_byte;
-                            3'd2: uart_trig_addr[15:8]  <= rx_byte;
-                            3'd3: uart_trig_addr[7:0]   <= rx_byte;
-                            3'd4: uart_trig_mask[23:16] <= rx_byte;
-                            3'd5: uart_trig_mask[15:8]  <= rx_byte;
-                            3'd6: uart_trig_mask[7:0]   <= rx_byte;
-                            default: ;
-                        endcase
-                        if (cfg_idx == 3'd6) begin
-                            cfg_collect <= 1'b0;
-                            state       <= S_IDLE;
+                        if (cfg_cmd == 2'd0) begin
+                            case (cfg_idx)
+                                3'd0: uart_trig_mode        <= rx_byte[2:0];
+                                3'd1: uart_trig_addr[23:16] <= rx_byte;
+                                3'd2: uart_trig_addr[15:8]  <= rx_byte;
+                                3'd3: uart_trig_addr[7:0]   <= rx_byte;
+                                3'd4: uart_trig_mask[23:16] <= rx_byte;
+                                3'd5: uart_trig_mask[15:8]  <= rx_byte;
+                                3'd6: uart_trig_mask[7:0]   <= rx_byte;
+                                default: ;
+                            endcase
+                            if (cfg_idx == 3'd6) begin
+                                cfg_collect <= 1'b0;
+                                state       <= S_IDLE;
+                            end else begin
+                                cfg_idx <= cfg_idx + 3'd1;
+                            end
+                        end else if (cfg_cmd == 2'd1) begin
+                            case (cfg_idx)
+                                3'd0: ice_mouse_btn <= rx_byte;
+                                3'd1: ice_mouse_dx  <= rx_byte;
+                                3'd2: begin
+                                    ice_mouse_dy     <= rx_byte;
+                                    ice_mouse_strobe <= 1'b1;
+                                    cfg_collect      <= 1'b0;
+                                    state            <= S_IDLE;
+                                end
+                                default: state <= S_IDLE;
+                            endcase
+                            if (cfg_idx != 3'd2)
+                                cfg_idx <= cfg_idx + 3'd1;
                         end else begin
-                            cfg_idx <= cfg_idx + 3'd1;
+                            ice_kbd_data   <= rx_byte;
+                            ice_kbd_strobe <= 1'b1;
+                            cfg_collect    <= 1'b0;
+                            state          <= S_IDLE;
                         end
                     end
                 end
@@ -1091,6 +1181,99 @@ end
                                 state        <= S_PEEK_SET;
                             end
                         end
+                    end
+                end
+
+                // -------------------------------------------------------------
+                // 'W' / 'M' ICE SDRAM DMA Header (5 bytes: addr[23:0], cnt[15:0])
+                // -------------------------------------------------------------
+                S_MEM_HDR: begin
+                    if (rx_valid) begin
+                        case (mem_hdr_idx)
+                            3'd0: ice_mem_addr[20:15] <= rx_byte[5:0];
+                            3'd1: ice_mem_addr[14:7]  <= rx_byte;
+                            3'd2: ice_mem_addr[6:0]   <= rx_byte[7:1];
+                            3'd3: mem_word_cnt[15:8]  <= rx_byte;
+                            3'd4: mem_word_cnt[7:0]   <= rx_byte;
+                            default: ;
+                        endcase
+                        if (mem_hdr_idx == 3'd4) begin
+                            if ({mem_word_cnt[15:8], rx_byte} == 16'd0) begin
+                                state <= S_IDLE;
+                            end else if (ice_mem_we) begin
+                                mem_wr_hi_rx <= 1'b0;
+                                state        <= S_MEM_WR_DATA;
+                            end else begin
+                                state        <= S_MEM_EXEC;
+                            end
+                        end else begin
+                            mem_hdr_idx <= mem_hdr_idx + 3'd1;
+                        end
+                    end
+                end
+
+                // -------------------------------------------------------------
+                // 'W' Collect 2 bytes (big-endian 16-bit word) from UART RX
+                // -------------------------------------------------------------
+                S_MEM_WR_DATA: begin
+                    if (rx_valid) begin
+                        if (!mem_wr_hi_rx) begin
+                            ice_mem_wdata[15:8] <= rx_byte;
+                            mem_wr_hi_rx        <= 1'b1;
+                        end else begin
+                            ice_mem_wdata[7:0]  <= rx_byte;
+                            mem_wr_hi_rx        <= 1'b0;
+                            state               <= S_MEM_EXEC;
+                        end
+                    end
+                end
+
+                // -------------------------------------------------------------
+                // Execute 1 SDRAM word access during a cpuBusControl slot
+                // (probes[0] == cpuBusControl) while cpu_slot is gated by ice_mem_busy
+                // -------------------------------------------------------------
+                S_MEM_EXEC: begin
+                    if (!ice_mem_active) begin
+                        if ((ice_mem_we || fifo_has_room) &&
+                            (bus_phase == 3'd1) && probes[0]) begin
+                            ice_mem_active <= 1'b1;
+                        end
+                    end else if (bus_phase == 3'd6) begin
+                        ice_mem_active <= 1'b0;
+                        if (ice_mem_we) begin
+                            ice_mem_addr <= ice_mem_addr + 21'd1;
+                            if (mem_word_cnt == 16'd1) begin
+                                // Trigger BRAM cache invalidation sweep (idx 7) + send 'K' ack
+                                ice_poke_valid <= 1'b1;
+                                ice_poke_idx   <= 3'd7;
+                                fifo_wr        <= 1'b1;
+                                fifo_din       <= "K";
+                                state          <= S_IDLE;
+                            end else begin
+                                mem_word_cnt <= mem_word_cnt - 16'd1;
+                                state        <= S_MEM_WR_DATA;
+                            end
+                        end else begin
+                            fifo_wr      <= 1'b1;
+                            fifo_din     <= sdram_dout[15:8];
+                            mem_lo_byte  <= sdram_dout[7:0];
+                            state        <= S_MEM_RD_LO;
+                        end
+                    end
+                end
+
+                // -------------------------------------------------------------
+                // 'M' Push low byte of read word into TX FIFO
+                // -------------------------------------------------------------
+                S_MEM_RD_LO: begin
+                    fifo_wr      <= 1'b1;
+                    fifo_din     <= mem_lo_byte;
+                    ice_mem_addr <= ice_mem_addr + 21'd1;
+                    if (mem_word_cnt == 16'd1) begin
+                        state <= S_IDLE;
+                    end else begin
+                        mem_word_cnt <= mem_word_cnt - 16'd1;
+                        state        <= S_MEM_EXEC;
                     end
                 end
 

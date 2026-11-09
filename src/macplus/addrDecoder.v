@@ -131,19 +131,15 @@ module addrDecoder(
 			4'b0110:
 				if (memoryOverlayOn)
 					selectRAM = !_cpuAS;
-			// Mac Plus RAM mirrors: $800000-$BFFFFF alias $000000-$3FFFFF.
-			// address = cpuAddr[23:1], so case word [23:20] = {A23,A22,A21,A20}
-			// and 4'b10xx is A23=1. No addrMux remap is needed: the RAM word
-			// address is already cpuAddr[21:1], which drops A23 and A22.
+			// Mac Plus A23 RAM mirror ($800000-$8FFFFF aliases $000000-$0FFFFF).
+			// Note: $900000-$9FFFFF (4'b1001) is SCC Read and $B00000-$BFFFFF
+			// (4'b1011) is SCC Write ($BFFFF9/$BFFFFB enable SCC DCD mouse IRQs)
+			// — those MUST decode as selectSCC via 4'b10?1 below, NEVER selectRAM!
 			4'b1000: begin // $800000-$8FFFFF (A23 mirror of $000000-$0FFFFF)
 				if (configRAMSize[1])
 					selectRAM = !_cpuAS;          // 1MB/4MB boards
 			end
 			4'b1010: begin // $A00000-$AFFFFF (A22 mirror)
-				if (configRAMSize == 2'b11)       // 4MB boards only
-					selectRAM = !_cpuAS;
-			end
-			4'b1011: begin // $B00000-$BFFFFF (A23+A22 mirror)
 				if (configRAMSize == 2'b11)       // 4MB boards only
 					selectRAM = !_cpuAS;
 			end

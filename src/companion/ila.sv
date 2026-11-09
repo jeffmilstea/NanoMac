@@ -41,7 +41,24 @@ module ila (
     output [15:0]       ice_poke_data,
     output              ice_peek_req,
     output [2:0]        ice_peek_idx,
-    input  [15:0]       ice_peek_data
+    input  [15:0]       ice_peek_data,
+
+    // ICE SDRAM DMA read/write port (clk_pixel domain)
+    input  [2:0]        bus_phase,
+    input  [15:0]       sdram_dout,
+    output              ice_mem_busy,
+    output              ice_mem_active,
+    output              ice_mem_we,
+    output [20:0]       ice_mem_addr,
+    output [15:0]       ice_mem_wdata,
+
+    // ICE HID injection (mouse quadrature/button + keyboard scancode)
+    output              ice_mouse_strobe,
+    output [7:0]        ice_mouse_btn,
+    output [7:0]        ice_mouse_dx,
+    output [7:0]        ice_mouse_dy,
+    output              ice_kbd_strobe,
+    output [7:0]        ice_kbd_data
 );
 
     // -------------------------------------------------------------------------
@@ -67,10 +84,13 @@ module ila (
     wire bus_cycle_done = (!_cpuAS_d && _cpuAS); // Rising edge of _cpuAS
 
     // Clock gating logic
-    // CPU runs if not halted, or while step counters are non-zero
+    // CPU runs if not halted, or while step counters are non-zero.
+    // Note: Do NOT gate enPhi1/enPhi2 asynchronously with ice_mem_busy across the
+    // 15.6672 MHz -> 39.168 MHz (clk_cpu) boundary, or fx68k can see two consecutive
+    // enPhi1 pulses and enter HALT1_NMA double-fault!
     wire stepping_clocks = (step_clock_cnt != 16'd0);
     wire stepping_bus    = (step_bus_cnt != 16'd0);
-    wire cpu_allowed     = !halted || stepping_clocks || stepping_bus;
+    wire cpu_allowed     = (!halted || stepping_clocks || stepping_bus);
 
     assign enPhi1_out = cpu_allowed ? enPhi1_in : 1'b0;
     assign enPhi2_out = cpu_allowed ? enPhi2_in : 1'b0;
@@ -573,7 +593,20 @@ module ila (
         .ice_poke_data(ice_poke_data),
         .ice_peek_req(ice_peek_req),
         .ice_peek_idx(ice_peek_idx),
-        .ice_peek_data(ice_peek_data)
+        .ice_peek_data(ice_peek_data),
+        .bus_phase(bus_phase),
+        .sdram_dout(sdram_dout),
+        .ice_mem_busy(ice_mem_busy),
+        .ice_mem_active(ice_mem_active),
+        .ice_mem_we(ice_mem_we),
+        .ice_mem_addr(ice_mem_addr),
+        .ice_mem_wdata(ice_mem_wdata),
+        .ice_mouse_strobe(ice_mouse_strobe),
+        .ice_mouse_btn(ice_mouse_btn),
+        .ice_mouse_dx(ice_mouse_dx),
+        .ice_mouse_dy(ice_mouse_dy),
+        .ice_kbd_strobe(ice_kbd_strobe),
+        .ice_kbd_data(ice_kbd_data)
     );
 
 endmodule
